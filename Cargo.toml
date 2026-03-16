@@ -1,0 +1,3 @@
+[workspace]
+members = ["vrc-backend", "vrc-macros"]
+resolver = "3"
