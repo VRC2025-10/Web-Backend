@@ -1,0 +1,70 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT user_id, nickname, vrc_id, x_id, bio_markdown, bio_html,\n                   avatar_url, is_public, updated_at\n            FROM profiles WHERE user_id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "nickname",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "vrc_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "x_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "bio_markdown",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "bio_html",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "avatar_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "is_public",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 8,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "2a7da7c50487fb2610feadb185ebfe3938233cc859055063566ef4818706bae8"
+}

@@ -1,0 +1,66 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT g.id, g.club_id, g.image_url, g.caption, g.uploaded_by_user_id,\n                   u.discord_id as uploader_discord_id,\n                   u.discord_display_name as uploader_discord_display_name,\n                   g.created_at\n            FROM gallery_images g\n            JOIN users u ON u.id = g.uploaded_by_user_id\n            WHERE g.club_id = $1 AND g.status = 'approved'\n            ORDER BY g.created_at DESC\n            LIMIT $2 OFFSET $3\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "club_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "image_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "caption",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "uploaded_by_user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 5,
+        "name": "uploader_discord_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "uploader_discord_display_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "c9410134a88badac07658e9d127e53d4763dc085f7f37a68279ea1a5a1314e8d"
+}

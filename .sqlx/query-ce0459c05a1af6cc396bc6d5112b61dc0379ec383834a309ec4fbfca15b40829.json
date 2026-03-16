@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT c.id, c.name, c.description_html, c.cover_image_url, c.owner_user_id,\n                   u.discord_id as owner_discord_id, u.discord_display_name as owner_discord_display_name,\n                   c.created_at\n            FROM clubs c\n            JOIN users u ON u.id = c.owner_user_id\n            WHERE c.id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "description_html",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "cover_image_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "owner_user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 5,
+        "name": "owner_discord_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "owner_discord_display_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "ce0459c05a1af6cc396bc6d5112b61dc0379ec383834a309ec4fbfca15b40829"
+}

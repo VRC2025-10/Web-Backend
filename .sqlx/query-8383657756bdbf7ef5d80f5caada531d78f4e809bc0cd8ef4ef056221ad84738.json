@@ -1,0 +1,82 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT u.id as user_id, u.discord_id, u.discord_display_name,\n                   u.discord_avatar_hash, u.joined_at,\n                   p.nickname, p.avatar_url as profile_avatar_url, p.bio_html,\n                   p.vrc_id, p.x_id, p.updated_at as profile_updated_at\n            FROM users u\n            LEFT JOIN profiles p ON p.user_id = u.id AND p.is_public = true\n            WHERE u.discord_id = $1 AND u.status = 'active'\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "discord_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "discord_display_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "discord_avatar_hash",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "joined_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 5,
+        "name": "nickname",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "profile_avatar_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "bio_html",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "vrc_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "x_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "profile_updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "8383657756bdbf7ef5d80f5caada531d78f4e809bc0cd8ef4ef056221ad84738"
+}

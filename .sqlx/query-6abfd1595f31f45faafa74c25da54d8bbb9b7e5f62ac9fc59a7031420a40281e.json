@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE profiles SET is_public = false, updated_at = NOW() WHERE user_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6abfd1595f31f45faafa74c25da54d8bbb9b7e5f62ac9fc59a7031420a40281e"
+}

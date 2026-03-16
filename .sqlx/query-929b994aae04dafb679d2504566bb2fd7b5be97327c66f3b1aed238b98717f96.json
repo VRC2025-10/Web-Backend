@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT cm.user_id, u.discord_id, u.discord_display_name, cm.role, cm.joined_at,\n                   (c.owner_user_id = cm.user_id) as \"is_owner!: bool\"\n            FROM club_members cm\n            JOIN users u ON u.id = cm.user_id\n            JOIN clubs c ON c.id = cm.club_id\n            WHERE cm.club_id = $1\n            ORDER BY cm.joined_at ASC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "discord_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "discord_display_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "role",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "joined_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 5,
+        "name": "is_owner!: bool",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "929b994aae04dafb679d2504566bb2fd7b5be97327c66f3b1aed238b98717f96"
+}

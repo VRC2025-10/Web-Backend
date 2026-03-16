@@ -1,0 +1,116 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                SELECT s.id as session_id, s.user_id, s.expires_at,\n                       u.discord_id, u.discord_username,\n                       u.discord_display_name, u.discord_avatar_hash,\n                       u.avatar_url,\n                       u.role as \"role: UserRole\", u.status as \"status: UserStatus\",\n                       u.joined_at, u.created_at, u.updated_at\n                FROM sessions s\n                JOIN users u ON u.id = s.user_id\n                WHERE s.token_hash = $1 AND s.expires_at > NOW()\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "session_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "expires_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 3,
+        "name": "discord_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "discord_username",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "discord_display_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "discord_avatar_hash",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "avatar_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "role: UserRole",
+        "type_info": {
+          "Custom": {
+            "name": "user_role",
+            "kind": {
+              "Enum": [
+                "member",
+                "staff",
+                "admin",
+                "super_admin"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "status: UserStatus",
+        "type_info": {
+          "Custom": {
+            "name": "user_status",
+            "kind": {
+              "Enum": [
+                "active",
+                "suspended"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "joined_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 11,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 12,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "d93fbe520ccacc07ee862d3927b96dda00d53faf6c93ade147ff69133b05b094"
+}

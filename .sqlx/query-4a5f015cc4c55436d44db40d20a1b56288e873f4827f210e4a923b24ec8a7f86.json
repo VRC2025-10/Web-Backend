@@ -1,0 +1,77 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO profiles (user_id, nickname, vrc_id, x_id, bio_markdown, bio_html, avatar_url, is_public, updated_at)\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())\n        ON CONFLICT (user_id) DO UPDATE SET\n            nickname = EXCLUDED.nickname,\n            vrc_id = EXCLUDED.vrc_id,\n            x_id = EXCLUDED.x_id,\n            bio_markdown = EXCLUDED.bio_markdown,\n            bio_html = EXCLUDED.bio_html,\n            avatar_url = EXCLUDED.avatar_url,\n            is_public = EXCLUDED.is_public,\n            updated_at = NOW()\n        RETURNING user_id, nickname, vrc_id, x_id, bio_markdown, bio_html, avatar_url, is_public, updated_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "nickname",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "vrc_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "x_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "bio_markdown",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "bio_html",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "avatar_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "is_public",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 8,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "4a5f015cc4c55436d44db40d20a1b56288e873f4827f210e4a923b24ec8a7f86"
+}

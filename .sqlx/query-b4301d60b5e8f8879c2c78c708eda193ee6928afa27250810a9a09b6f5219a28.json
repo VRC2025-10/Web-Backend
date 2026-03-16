@@ -1,0 +1,77 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT u.id as user_id, u.discord_id, u.discord_display_name,\n                   u.discord_avatar_hash, u.joined_at,\n                   p.nickname, p.avatar_url as profile_avatar_url, p.bio_html,\n                   p.vrc_id, p.x_id\n            FROM users u\n            LEFT JOIN profiles p ON p.user_id = u.id AND p.is_public = true\n            WHERE u.status = 'active'\n            ORDER BY u.joined_at DESC\n            LIMIT $1 OFFSET $2\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "discord_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "discord_display_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "discord_avatar_hash",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "joined_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 5,
+        "name": "nickname",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "profile_avatar_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "bio_html",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "vrc_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "x_id",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "b4301d60b5e8f8879c2c78c708eda193ee6928afa27250810a9a09b6f5219a28"
+}

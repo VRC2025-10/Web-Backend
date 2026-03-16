@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT u.discord_id, u.discord_display_name, cm.role, cm.joined_at\n        FROM club_members cm\n        JOIN users u ON u.id = cm.user_id\n        WHERE cm.club_id = $1\n        ORDER BY cm.joined_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "discord_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "discord_display_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "role",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "joined_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "bb28dab2b06b0a2489b84f79a386859aa19a4a0927dab9af7d89f4f79e485e1f"
+}

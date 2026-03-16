@@ -1,0 +1,59 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT c.id, c.name, c.description_html,\n               u.discord_id as owner_discord_id,\n               u.discord_display_name as owner_display_name,\n               (SELECT COUNT(*) FROM club_members WHERE club_id = c.id) as \"member_count!: i64\",\n               c.created_at\n        FROM clubs c\n        JOIN users u ON u.id = c.owner_user_id\n        ORDER BY c.name\n        LIMIT $1 OFFSET $2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "description_html",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "owner_discord_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "owner_display_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "member_count!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      null,
+      false
+    ]
+  },
+  "hash": "e8a1a29fd611617b0d58bce01cc434d7e92280d0ad227f241aa86b2e572481e9"
+}
