@@ -1,0 +1,90 @@
+use std::time::Instant;
+
+use tokio::net::TcpListener;
+use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
+
+use vrc_backend::adapters::inbound::routes;
+use vrc_backend::background::scheduler;
+use vrc_backend::config::AppConfig;
+use vrc_backend::AppState;
+
+#[tokio::main]
+async fn main() {
+    dotenvy::dotenv().ok();
+
+    tracing_subscriber::registry()
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            "vrc_backend=info,tower_http=info,sqlx=warn".parse().expect("valid filter")
+        }))
+        .with(fmt::layer().json())
+        .init();
+
+    let config = AppConfig::from_env().expect("Failed to load configuration");
+    tracing::info!(
+        bind_addr = %config.bind_address,
+        "Starting VRC Backend v{}",
+        env!("CARGO_PKG_VERSION")
+    );
+
+    let db_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(config.database_max_connections)
+        .connect(&config.database_url)
+        .await
+        .expect("Failed to connect to database");
+
+    tracing::info!("Running database migrations...");
+    sqlx::migrate!("./migrations")
+        .run(&db_pool)
+        .await
+        .expect("Failed to run database migrations");
+
+    // Bootstrap super admin if configured
+    if let Some(ref discord_id) = config.super_admin_discord_id {
+        bootstrap_super_admin(&db_pool, discord_id).await;
+    }
+
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .expect("Failed to create HTTP client");
+
+    let state = std::sync::Arc::new(AppState {
+        db_pool: db_pool.clone(),
+        http_client,
+        config,
+        start_time: Instant::now(),
+    });
+
+    // Start background tasks
+    scheduler::spawn(db_pool.clone());
+
+    let app = routes::build_router(state.clone());
+
+    let listener = TcpListener::bind(&state.config.bind_address)
+        .await
+        .expect("Failed to bind TCP listener");
+
+    tracing::info!("Listening on {}", state.config.bind_address);
+
+    axum::serve(listener, app)
+        .await
+        .expect("Server error");
+}
+
+async fn bootstrap_super_admin(db_pool: &sqlx::PgPool, discord_id: &str) {
+    let result = sqlx::query(
+        r#"
+        INSERT INTO users (discord_id, discord_username, discord_display_name, role, status)
+        VALUES ($1, 'SuperAdmin', 'SuperAdmin', 'super_admin', 'active')
+        ON CONFLICT (discord_id) DO UPDATE SET role = 'super_admin'
+        "#,
+    )
+    .bind(discord_id)
+    .execute(db_pool)
+    .await;
+
+    match result {
+        Ok(_) => tracing::info!(discord_id = discord_id, "Super admin bootstrapped"),
+        Err(e) => tracing::warn!(error = %e, "Failed to bootstrap super admin"),
+    }
+}
