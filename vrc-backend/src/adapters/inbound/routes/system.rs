@@ -1,0 +1,416 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
+use axum::routing::post;
+use axum::{Json, Router};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
+use uuid::Uuid;
+
+use crate::AppState;
+use crate::adapters::outbound::markdown::renderer::PulldownCmarkRenderer;
+use crate::domain::entities::event::EventStatus;
+use crate::domain::entities::user::UserStatus;
+use crate::domain::ports::services::markdown_renderer::MarkdownRenderer;
+use crate::errors::api::ApiError;
+
+// ===== System token verification =====
+
+/// Verify Bearer token via constant-time comparison to prevent timing attacks.
+fn verify_system_token(headers: &HeaderMap, expected: &str) -> Result<(), ApiError> {
+    let auth_header = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(ApiError::SystemTokenInvalid)?;
+
+    let token = auth_header
+        .strip_prefix("Bearer ")
+        .ok_or(ApiError::SystemTokenInvalid)?;
+
+    if token.as_bytes().ct_eq(expected.as_bytes()).into() {
+        Ok(())
+    } else {
+        Err(ApiError::SystemTokenInvalid)
+    }
+}
+
+// ===== Event sync types =====
+
+#[derive(Deserialize)]
+struct EventUpsertRequest {
+    external_id: String,
+    title: String,
+    description_markdown: Option<String>,
+    status: EventStatus,
+    host_discord_id: Option<String>,
+    start_time: DateTime<Utc>,
+    end_time: Option<DateTime<Utc>>,
+    location: Option<String>,
+    tags: Option<Vec<String>>,
+}
+
+#[derive(Serialize)]
+struct EventUpsertResponse {
+    id: Uuid,
+    external_id: String,
+    title: String,
+    status: EventStatus,
+    action: UpsertAction,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum UpsertAction {
+    Created,
+    Updated,
+}
+
+// ===== Member leave types =====
+
+#[derive(Deserialize)]
+struct MemberLeaveRequest {
+    discord_id: String,
+}
+
+#[derive(Serialize)]
+struct MemberLeaveResponse {
+    user_id: Uuid,
+    discord_id: String,
+    previous_status: UserStatus,
+    new_status: UserStatus,
+    sessions_invalidated: i64,
+    clubs_removed: i64,
+    profile_set_private: bool,
+}
+
+// ===== Handlers =====
+
+async fn upsert_event(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<EventUpsertRequest>,
+) -> Result<(StatusCode, Json<EventUpsertResponse>), ApiError> {
+    verify_system_token(&headers, &state.config.system_api_token)?;
+
+    // Validate fields
+    let mut errors: HashMap<String, String> = HashMap::new();
+
+    if body.external_id.is_empty() || body.external_id.len() > 100 {
+        errors.insert(
+            "external_id".to_owned(),
+            "1〜100文字で入力してください".to_owned(),
+        );
+    }
+
+    if body.title.is_empty() || body.title.len() > 200 {
+        errors.insert(
+            "title".to_owned(),
+            "1〜200文字で入力してください".to_owned(),
+        );
+    }
+
+    if let Some(ref desc) = body.description_markdown {
+        if desc.len() > 2000 {
+            errors.insert(
+                "description_markdown".to_owned(),
+                "2000文字以内で入力してください".to_owned(),
+            );
+        }
+    }
+
+    if let Some(ref location) = body.location {
+        if location.len() > 200 {
+            errors.insert(
+                "location".to_owned(),
+                "200文字以内で入力してください".to_owned(),
+            );
+        }
+    }
+
+    if let Some(ref tags) = body.tags {
+        if tags.len() > 10 {
+            errors.insert("tags".to_owned(), "タグは最大10個までです".to_owned());
+        }
+        for tag in tags {
+            if tag.is_empty() || tag.len() > 50 {
+                errors.insert(
+                    "tags".to_owned(),
+                    "各タグは1〜50文字で入力してください".to_owned(),
+                );
+                break;
+            }
+        }
+    }
+
+    if let Some(end_time) = body.end_time {
+        if end_time <= body.start_time {
+            errors.insert(
+                "end_time".to_owned(),
+                "end_time は start_time より後にしてください".to_owned(),
+            );
+        }
+    }
+
+    if !errors.is_empty() {
+        return Err(ApiError::SystemValidation(errors));
+    }
+
+    // Render markdown if provided
+    let description_html = body.description_markdown.as_ref().map(|md| {
+        let renderer = PulldownCmarkRenderer::new();
+        renderer.render(md)
+    });
+
+    // Resolve host user if discord_id provided
+    let host_user_id: Option<Uuid> = if let Some(ref discord_id) = body.host_discord_id {
+        sqlx::query_scalar!("SELECT id FROM users WHERE discord_id = $1", discord_id)
+            .fetch_optional(&state.db_pool)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?
+    } else {
+        None
+    };
+
+    let host_name = if let Some(ref discord_id) = body.host_discord_id {
+        sqlx::query_scalar!(
+            "SELECT discord_display_name FROM users WHERE discord_id = $1",
+            discord_id
+        )
+        .fetch_optional(&state.db_pool)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    // Begin transaction: upsert event + manage tags
+    let mut tx = state
+        .db_pool
+        .begin()
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    // Upsert event — use xmax to detect insert vs update
+    let row = sqlx::query!(
+        r#"
+        INSERT INTO events (external_source_id, title, description_markdown, description_html,
+                           host_user_id, host_name, event_status, start_time, end_time, location)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        ON CONFLICT (external_source_id) DO UPDATE SET
+            title = EXCLUDED.title,
+            description_markdown = EXCLUDED.description_markdown,
+            description_html = EXCLUDED.description_html,
+            host_user_id = EXCLUDED.host_user_id,
+            host_name = EXCLUDED.host_name,
+            event_status = EXCLUDED.event_status,
+            start_time = EXCLUDED.start_time,
+            end_time = EXCLUDED.end_time,
+            location = EXCLUDED.location,
+            updated_at = NOW()
+        RETURNING id, created_at, updated_at, (xmax = 0) as "is_insert!: bool"
+        "#,
+        body.external_id,
+        body.title,
+        body.description_markdown.as_deref().unwrap_or(""),
+        description_html.as_deref().unwrap_or(""),
+        host_user_id,
+        host_name,
+        body.status as EventStatus,
+        body.start_time,
+        body.end_time,
+        body.location,
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    let event_id = row.id;
+
+    // Delete existing tag mappings for this event
+    sqlx::query!("DELETE FROM event_tag_mappings WHERE event_id = $1", event_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    // Upsert tags and create mappings
+    if let Some(ref tags) = body.tags {
+        for tag_name in tags {
+            let tag_id = sqlx::query_scalar!(
+                r#"
+                INSERT INTO event_tags (name) VALUES ($1)
+                ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
+                RETURNING id
+                "#,
+                tag_name
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+            sqlx::query!(
+                "INSERT INTO event_tag_mappings (event_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                event_id,
+                tag_id
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        }
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    let (action, http_status) = if row.is_insert {
+        (UpsertAction::Created, StatusCode::CREATED)
+    } else {
+        (UpsertAction::Updated, StatusCode::OK)
+    };
+
+    tracing::info!(
+        event_id = %event_id,
+        external_id = %body.external_id,
+        action = ?action,
+        "Event synced"
+    );
+
+    Ok((
+        http_status,
+        Json(EventUpsertResponse {
+            id: event_id,
+            external_id: body.external_id,
+            title: body.title,
+            status: body.status,
+            action,
+            created_at: if row.is_insert {
+                Some(row.created_at)
+            } else {
+                None
+            },
+            updated_at: if !row.is_insert {
+                Some(row.updated_at)
+            } else {
+                None
+            },
+        }),
+    ))
+}
+
+async fn handle_member_leave(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<MemberLeaveRequest>,
+) -> Result<(StatusCode, Json<Option<MemberLeaveResponse>>), ApiError> {
+    verify_system_token(&headers, &state.config.system_api_token)?;
+
+    // Validate discord_id
+    if body.discord_id.is_empty() || body.discord_id.len() > 20 {
+        let mut errors = HashMap::new();
+        errors.insert(
+            "discord_id".to_owned(),
+            "1〜20文字の数値を入力してください".to_owned(),
+        );
+        return Err(ApiError::SystemValidation(errors));
+    }
+
+    // Look up the user
+    let user = sqlx::query!(
+        r#"
+        SELECT id, status as "status: UserStatus"
+        FROM users WHERE discord_id = $1
+        "#,
+        body.discord_id
+    )
+    .fetch_optional(&state.db_pool)
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    let user = match user {
+        Some(u) => u,
+        // User not found in system — this is not an error per spec
+        None => return Ok((StatusCode::NO_CONTENT, Json(None))),
+    };
+
+    let previous_status = user.status;
+    let user_id = user.id;
+
+    // Atomic transaction: suspend + delete sessions + make profile private + remove from clubs
+    let mut tx = state
+        .db_pool
+        .begin()
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    // 1. Suspend user
+    sqlx::query!(
+        "UPDATE users SET status = 'suspended', updated_at = NOW() WHERE id = $1",
+        user_id
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    // 2. Delete all sessions
+    let sessions_deleted = sqlx::query!("DELETE FROM sessions WHERE user_id = $1", user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .rows_affected();
+
+    // 3. Set profile to non-public
+    let profile_updated = sqlx::query!(
+        "UPDATE profiles SET is_public = false, updated_at = NOW() WHERE user_id = $1",
+        user_id
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?
+    .rows_affected();
+
+    // 4. Remove from all clubs
+    let clubs_removed = sqlx::query!("DELETE FROM club_members WHERE user_id = $1", user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .rows_affected();
+
+    tx.commit()
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    tracing::info!(
+        user_id = %user_id,
+        discord_id = %body.discord_id,
+        sessions_invalidated = sessions_deleted,
+        clubs_removed = clubs_removed,
+        "Member leave processed"
+    );
+
+    Ok((
+        StatusCode::OK,
+        Json(Some(MemberLeaveResponse {
+            user_id,
+            discord_id: body.discord_id,
+            previous_status,
+            new_status: UserStatus::Suspended,
+            sessions_invalidated: sessions_deleted as i64,
+            clubs_removed: clubs_removed as i64,
+            profile_set_private: profile_updated > 0,
+        })),
+    ))
+}
+
+pub fn routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/events", post(upsert_event))
+        .route("/sync/users/leave", post(handle_member_leave))
+}
