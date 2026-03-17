@@ -7,10 +7,10 @@ use axum_extra::extract::CookieJar;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::AppState;
 use crate::auth::roles::Role;
 use crate::domain::entities::user::{User, UserRole, UserStatus};
 use crate::errors::api::ApiError;
-use crate::AppState;
 
 /// Axum extractor that validates session and enforces minimum role at compile time.
 ///
@@ -41,6 +41,9 @@ impl<R: Role> FromRequestParts<Arc<AppState>> for AuthenticatedUser<R> {
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
         let state = state.clone();
         async move {
+            use base64::Engine;
+            use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
             let jar = CookieJar::from_headers(&parts.headers);
 
             let raw_token = jar
@@ -50,9 +53,6 @@ impl<R: Role> FromRequestParts<Arc<AppState>> for AuthenticatedUser<R> {
                 .to_owned();
 
             // Decode base64url token
-            use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-            use base64::Engine;
-
             let token_bytes = URL_SAFE_NO_PAD
                 .decode(&raw_token)
                 .map_err(|_| ApiError::SessionInvalid)?;

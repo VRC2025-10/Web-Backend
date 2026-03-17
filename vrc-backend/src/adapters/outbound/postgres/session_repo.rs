@@ -21,6 +21,10 @@ impl SessionRepository for PgSessionRepository {
         token_hash: &[u8],
         max_age_secs: i64,
     ) -> Result<Uuid, InfraError> {
+        // max_age_secs is at most ~604800 (7 days), well within f64 precision
+        #[allow(clippy::cast_precision_loss)]
+        let max_age_f64 = max_age_secs as f64;
+
         let row = sqlx::query_scalar!(
             r#"
             INSERT INTO sessions (user_id, token_hash, expires_at)
@@ -29,7 +33,7 @@ impl SessionRepository for PgSessionRepository {
             "#,
             user_id,
             token_hash,
-            max_age_secs as f64
+            max_age_f64
         )
         .fetch_one(&self.pool)
         .await?;

@@ -74,10 +74,7 @@ impl DiscordClient for ReqwestDiscordClient {
             .map_err(|e| InfraError::DiscordApi(e.to_string()))
     }
 
-    async fn get_user_guilds(
-        &self,
-        access_token: &str,
-    ) -> Result<Vec<DiscordGuild>, InfraError> {
+    async fn get_user_guilds(&self, access_token: &str) -> Result<Vec<DiscordGuild>, InfraError> {
         let resp = self
             .http
             .get("https://discord.com/api/v10/users/@me/guilds")

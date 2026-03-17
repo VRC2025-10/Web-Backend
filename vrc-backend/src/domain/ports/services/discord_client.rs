@@ -43,7 +43,7 @@ impl DiscordUser {
         })
     }
 
-    /// Return display name: prefer global_name, fallback to username.
+    /// Return display name: prefer `global_name`, fallback to username.
     pub fn display_name(&self) -> &str {
         self.global_name.as_deref().unwrap_or(&self.username)
     }

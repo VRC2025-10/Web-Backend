@@ -27,16 +27,14 @@ impl MarkdownRenderer for PulldownCmarkRenderer {
         html::push_html(&mut html_output, parser);
 
         // Sanitize with ammonia — allowlist-based to prevent XSS
-        let sanitized = ammonia::Builder::new()
+        ammonia::Builder::new()
             .tags(ALLOWED_TAGS.iter().copied().collect())
             .add_tag_attributes("a", &["href"])
             .add_tag_attributes("img", &["src", "alt"])
             .url_schemes(["https"].iter().copied().collect())
             .link_rel(Some("noopener noreferrer"))
             .clean(&html_output)
-            .to_string();
-
-        sanitized
+            .to_string()
     }
 }
 

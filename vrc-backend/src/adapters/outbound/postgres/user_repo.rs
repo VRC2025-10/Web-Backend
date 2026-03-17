@@ -92,11 +92,7 @@ impl UserRepository for PgUserRepository {
         Ok(())
     }
 
-    async fn update_status(
-        &self,
-        user_id: Uuid,
-        new_status: UserStatus,
-    ) -> Result<(), InfraError> {
+    async fn update_status(&self, user_id: Uuid, new_status: UserStatus) -> Result<(), InfraError> {
         sqlx::query!(
             "UPDATE users SET status = $1, updated_at = NOW() WHERE id = $2",
             new_status as UserStatus,

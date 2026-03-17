@@ -3,10 +3,10 @@ use std::time::Instant;
 use tokio::net::TcpListener;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
+use vrc_backend::AppState;
 use vrc_backend::adapters::inbound::routes;
 use vrc_backend::background::scheduler;
 use vrc_backend::config::AppConfig;
-use vrc_backend::AppState;
 
 #[tokio::main]
 async fn main() {
@@ -14,7 +14,9 @@ async fn main() {
 
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            "vrc_backend=info,tower_http=info,sqlx=warn".parse().expect("valid filter")
+            "vrc_backend=info,tower_http=info,sqlx=warn"
+                .parse()
+                .expect("valid filter")
         }))
         .with(fmt::layer().json())
         .init();
@@ -56,7 +58,7 @@ async fn main() {
     });
 
     // Start background tasks
-    scheduler::spawn(db_pool.clone());
+    scheduler::spawn(db_pool.clone(), state.config.session_cleanup_interval_secs);
 
     let app = routes::build_router(state.clone());
 
@@ -66,18 +68,16 @@ async fn main() {
 
     tracing::info!("Listening on {}", state.config.bind_address);
 
-    axum::serve(listener, app)
-        .await
-        .expect("Server error");
+    axum::serve(listener, app).await.expect("Server error");
 }
 
 async fn bootstrap_super_admin(db_pool: &sqlx::PgPool, discord_id: &str) {
     let result = sqlx::query(
-        r#"
+        r"
         INSERT INTO users (discord_id, discord_username, discord_display_name, role, status)
         VALUES ($1, 'SuperAdmin', 'SuperAdmin', 'super_admin', 'active')
         ON CONFLICT (discord_id) DO UPDATE SET role = 'super_admin'
-        "#,
+        ",
     )
     .bind(discord_id)
     .execute(db_pool)

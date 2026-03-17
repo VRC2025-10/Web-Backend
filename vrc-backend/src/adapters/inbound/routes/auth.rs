@@ -1,22 +1,22 @@
 use std::sync::Arc;
 
+use axum::Router;
 use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
-use axum::Router;
 use axum_extra::extract::CookieJar;
 use axum_extra::extract::cookie::Cookie;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::AppState;
 use crate::adapters::outbound::discord::client::ReqwestDiscordClient;
 use crate::domain::ports::services::discord_client::DiscordClient;
-use crate::AppState;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -117,6 +117,7 @@ async fn login(
     (jar.add(oauth_cookie), Redirect::temporary(&discord_url))
 }
 
+#[allow(clippy::too_many_lines)] // OAuth callback flow is inherently long
 async fn callback(
     State(state): State<Arc<AppState>>,
     Query(query): Query<CallbackQuery>,
@@ -202,9 +203,7 @@ async fn callback(
             error_redirect("discord_error")
         })?;
 
-    let is_member = guilds
-        .iter()
-        .any(|g| g.id == state.config.discord_guild_id);
+    let is_member = guilds.iter().any(|g| g.id == state.config.discord_guild_id);
 
     if !is_member {
         return Err(error_redirect("not_member"));
@@ -256,6 +255,10 @@ async fn callback(
     hasher.update(raw_token);
     let token_hash = hasher.finalize().to_vec();
 
+    // session_max_age_secs is at most ~604800 (7 days), well within f64 precision
+    #[allow(clippy::cast_precision_loss)]
+    let max_age_f64 = state.config.session_max_age_secs as f64;
+
     sqlx::query!(
         r#"
         INSERT INTO sessions (user_id, token_hash, expires_at)
@@ -263,7 +266,7 @@ async fn callback(
         "#,
         user.id,
         &token_hash[..],
-        state.config.session_max_age_secs as f64
+        max_age_f64
     )
     .execute(&state.db_pool)
     .await

@@ -20,7 +20,5 @@ pub trait SessionRepository: Send + Sync {
         user_id: Uuid,
     ) -> impl std::future::Future<Output = Result<(), InfraError>> + Send;
 
-    fn cleanup_expired(
-        &self,
-    ) -> impl std::future::Future<Output = Result<u64, InfraError>> + Send;
+    fn cleanup_expired(&self) -> impl std::future::Future<Output = Result<u64, InfraError>> + Send;
 }

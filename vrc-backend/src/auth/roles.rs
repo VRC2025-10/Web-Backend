@@ -31,7 +31,7 @@ impl Role for SuperAdmin {
 }
 
 /// Compile-time role satisfaction check.
-/// R satisfies minimum role Min iff R::LEVEL >= Min::LEVEL.
+/// R satisfies minimum role Min iff `R::LEVEL` >= `Min::LEVEL`.
 pub trait SatisfiesRole<Min: Role>: Role {}
 
 // Implement role hierarchy
@@ -47,7 +47,7 @@ impl SatisfiesRole<Admin> for SuperAdmin {}
 impl SatisfiesRole<SuperAdmin> for SuperAdmin {}
 
 /// Type-safe wrapper to carry the role phantom type.
-/// Used internally by AuthenticatedUser.
+/// Used internally by `AuthenticatedUser`.
 pub struct RolePhantom<R: Role>(PhantomData<R>);
 
 impl<R: Role> RolePhantom<R> {

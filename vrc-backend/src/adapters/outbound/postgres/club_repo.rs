@@ -33,11 +33,7 @@ impl ClubRepository for PgClubRepository {
         Ok(row)
     }
 
-    async fn list(
-        &self,
-        limit: i64,
-        offset: i64,
-    ) -> Result<(Vec<ClubListRow>, i64), InfraError> {
+    async fn list(&self, limit: i64, offset: i64) -> Result<(Vec<ClubListRow>, i64), InfraError> {
         let rows = sqlx::query_as!(
             ClubListRow,
             r#"

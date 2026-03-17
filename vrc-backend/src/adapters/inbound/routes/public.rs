@@ -8,10 +8,10 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use uuid::Uuid;
 
+use crate::AppState;
 use crate::domain::entities::event::EventStatus;
 use crate::domain::value_objects::pagination::{PageRequest, PageResponse};
 use crate::errors::api::ApiError;
-use crate::AppState;
 
 // ===== Shared types =====
 
@@ -298,14 +298,16 @@ async fn get_member(
     .await
     .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    let profile = row.profile_updated_at.map(|updated_at| PublicProfileDetail {
-        nickname: row.nickname,
-        vrc_id: row.vrc_id,
-        x_id: row.x_id,
-        bio_html: row.bio_html,
-        avatar_url: row.avatar_url,
-        updated_at,
-    });
+    let profile = row
+        .profile_updated_at
+        .map(|updated_at| PublicProfileDetail {
+            nickname: row.nickname,
+            vrc_id: row.vrc_id,
+            x_id: row.x_id,
+            bio_html: row.bio_html,
+            avatar_url: row.avatar_url,
+            updated_at,
+        });
 
     Ok(Json(PublicMemberDetail {
         user_id: row.discord_id,

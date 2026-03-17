@@ -30,7 +30,7 @@ pub enum EventStatus {
 }
 
 /// Computed display status for API consumers.
-/// Derives from EventStatus + current time.
+/// Derives from `EventStatus` + current time.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DisplayStatus {

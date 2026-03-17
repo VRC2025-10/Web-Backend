@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
+use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use serde_json::json;
 
 use super::domain::DomainError;
@@ -45,6 +45,7 @@ pub enum ApiError {
 }
 
 impl IntoResponse for ApiError {
+    #[allow(clippy::too_many_lines)] // exhaustive error-to-response mapping
     fn into_response(self) -> Response {
         let (status, code, message, details) = match &self {
             Self::ProfileValidation(d) => (
