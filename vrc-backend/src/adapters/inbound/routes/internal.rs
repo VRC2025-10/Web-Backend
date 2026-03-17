@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -10,6 +10,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::AppState;
 use crate::adapters::outbound::markdown::renderer::PulldownCmarkRenderer;
 use crate::auth::extractor::AuthenticatedUser;
 use crate::auth::roles::Member;
@@ -18,7 +19,14 @@ use crate::domain::entities::report::ReportTargetType;
 use crate::domain::ports::services::markdown_renderer::MarkdownRenderer;
 use crate::domain::value_objects::pagination::{PageRequest, PageResponse};
 use crate::errors::api::ApiError;
-use crate::AppState;
+
+static VRC_ID_RE: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
+    regex_lite::Regex::new(r"^usr_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+        .expect("valid regex")
+});
+
+static X_ID_RE: LazyLock<regex_lite::Regex> =
+    LazyLock::new(|| regex_lite::Regex::new(r"^[a-zA-Z0-9_]{1,15}$").expect("valid regex"));
 
 // ===== Profile types =====
 
@@ -75,11 +83,11 @@ struct MeResponse {
 struct UserInfo {
     id: Uuid,
     discord_id: String,
-    discord_username: String,
-    avatar_url: Option<String>,
+    discord_display_name: String,
+    discord_avatar_hash: Option<String>,
     role: crate::domain::entities::user::UserRole,
     status: crate::domain::entities::user::UserStatus,
-    created_at: chrono::DateTime<Utc>,
+    joined_at: chrono::DateTime<Utc>,
 }
 
 #[derive(Serialize)]
@@ -140,11 +148,11 @@ async fn get_me(
         user: UserInfo {
             id: auth.user.id,
             discord_id: auth.user.discord_id,
-            discord_username: auth.user.discord_username,
-            avatar_url: auth.user.avatar_url,
+            discord_display_name: auth.user.discord_display_name,
+            discord_avatar_hash: auth.user.discord_avatar_hash,
             role: auth.user.role,
             status: auth.user.status,
-            created_at: auth.user.created_at,
+            joined_at: auth.user.joined_at,
         },
         has_profile,
         profile_summary,
@@ -156,20 +164,23 @@ async fn logout(
     _auth: AuthenticatedUser<Member>,
     jar: axum_extra::extract::CookieJar,
 ) -> impl IntoResponse {
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use sha2::{Digest, Sha256};
 
-    if let Some(cookie) = jar.get("session_id") {
-        if let Ok(token_bytes) = URL_SAFE_NO_PAD.decode(cookie.value()) {
-            let mut hasher = Sha256::new();
-            hasher.update(&token_bytes);
-            let token_hash = hasher.finalize().to_vec();
+    if let Some(cookie) = jar.get("session_id")
+        && let Ok(token_bytes) = URL_SAFE_NO_PAD.decode(cookie.value())
+    {
+        let mut hasher = Sha256::new();
+        hasher.update(&token_bytes);
+        let token_hash = hasher.finalize().to_vec();
 
-            let _ = sqlx::query!("DELETE FROM sessions WHERE token_hash = $1", &token_hash[..])
-                .execute(&state.db_pool)
-                .await;
-        }
+        let _ = sqlx::query!(
+            "DELETE FROM sessions WHERE token_hash = $1",
+            &token_hash[..]
+        )
+        .execute(&state.db_pool)
+        .await;
     }
 
     let remove_cookie = axum_extra::extract::cookie::Cookie::build(("session_id", ""))
@@ -220,48 +231,46 @@ async fn update_my_profile(
     // Validate fields
     let mut errors: HashMap<String, String> = HashMap::new();
 
-    if let Some(ref nickname) = body.nickname {
-        if nickname.is_empty() || nickname.len() > 50 {
-            errors.insert("nickname".to_owned(), "1〜50文字で入力してください".to_owned());
-        }
+    if let Some(ref nickname) = body.nickname
+        && (nickname.is_empty() || nickname.len() > 50)
+    {
+        errors.insert(
+            "nickname".to_owned(),
+            "1〜50文字で入力してください".to_owned(),
+        );
     }
 
-    if let Some(ref vrc_id) = body.vrc_id {
-        let re = regex_lite::Regex::new(
-            r"^usr_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-        )
-        .expect("valid regex");
-        if !re.is_match(vrc_id) {
-            errors.insert(
-                "vrc_id".to_owned(),
-                "VRC IDの形式が正しくありません".to_owned(),
-            );
-        }
+    if let Some(ref vrc_id) = body.vrc_id
+        && !VRC_ID_RE.is_match(vrc_id)
+    {
+        errors.insert(
+            "vrc_id".to_owned(),
+            "VRC IDの形式が正しくありません".to_owned(),
+        );
     }
 
-    if let Some(ref x_id) = body.x_id {
-        let re = regex_lite::Regex::new(r"^[a-zA-Z0-9_]{1,15}$").expect("valid regex");
-        if !re.is_match(x_id) {
-            errors.insert("x_id".to_owned(), "X IDの形式が正しくありません".to_owned());
-        }
+    if let Some(ref x_id) = body.x_id
+        && !X_ID_RE.is_match(x_id)
+    {
+        errors.insert("x_id".to_owned(), "X IDの形式が正しくありません".to_owned());
     }
 
-    if let Some(ref bio) = body.bio_markdown {
-        if bio.len() > 2000 {
-            errors.insert(
-                "bio_markdown".to_owned(),
-                "2000文字以内で入力してください".to_owned(),
-            );
-        }
+    if let Some(ref bio) = body.bio_markdown
+        && bio.len() > 2000
+    {
+        errors.insert(
+            "bio_markdown".to_owned(),
+            "2000文字以内で入力してください".to_owned(),
+        );
     }
 
-    if let Some(ref url) = body.avatar_url {
-        if url.len() > 500 || !url.starts_with("https://") {
-            errors.insert(
-                "avatar_url".to_owned(),
-                "有効なHTTPS URLを入力してください".to_owned(),
-            );
-        }
+    if let Some(ref url) = body.avatar_url
+        && (url.len() > 500 || !url.starts_with("https://"))
+    {
+        errors.insert(
+            "avatar_url".to_owned(),
+            "有効なHTTPS URLを入力してください".to_owned(),
+        );
     }
 
     if !errors.is_empty() {
@@ -380,10 +389,7 @@ async fn list_events(
 
     let mut tags_map: HashMap<Uuid, Vec<String>> = HashMap::new();
     for row in tag_rows {
-        tags_map
-            .entry(row.event_id)
-            .or_default()
-            .push(row.name);
+        tags_map.entry(row.event_id).or_default().push(row.name);
     }
 
     let items: Vec<EventSummary> = events
@@ -441,42 +447,34 @@ async fn create_report(
 
     // Verify target exists based on target_type
     let target_exists = match body.target_type {
-        ReportTargetType::Profile => {
-            sqlx::query_scalar!(
-                r#"SELECT EXISTS(SELECT 1 FROM profiles WHERE user_id = $1) as "exists!: bool""#,
-                body.target_id
-            )
-            .fetch_one(&state.db_pool)
-            .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?
-        }
-        ReportTargetType::Event => {
-            sqlx::query_scalar!(
-                r#"SELECT EXISTS(SELECT 1 FROM events WHERE id = $1) as "exists!: bool""#,
-                body.target_id
-            )
-            .fetch_one(&state.db_pool)
-            .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?
-        }
-        ReportTargetType::Club => {
-            sqlx::query_scalar!(
-                r#"SELECT EXISTS(SELECT 1 FROM clubs WHERE id = $1) as "exists!: bool""#,
-                body.target_id
-            )
-            .fetch_one(&state.db_pool)
-            .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?
-        }
-        ReportTargetType::GalleryImage => {
-            sqlx::query_scalar!(
-                r#"SELECT EXISTS(SELECT 1 FROM gallery_images WHERE id = $1) as "exists!: bool""#,
-                body.target_id
-            )
-            .fetch_one(&state.db_pool)
-            .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?
-        }
+        ReportTargetType::Profile => sqlx::query_scalar!(
+            r#"SELECT EXISTS(SELECT 1 FROM profiles WHERE user_id = $1) as "exists!: bool""#,
+            body.target_id
+        )
+        .fetch_one(&state.db_pool)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?,
+        ReportTargetType::Event => sqlx::query_scalar!(
+            r#"SELECT EXISTS(SELECT 1 FROM events WHERE id = $1) as "exists!: bool""#,
+            body.target_id
+        )
+        .fetch_one(&state.db_pool)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?,
+        ReportTargetType::Club => sqlx::query_scalar!(
+            r#"SELECT EXISTS(SELECT 1 FROM clubs WHERE id = $1) as "exists!: bool""#,
+            body.target_id
+        )
+        .fetch_one(&state.db_pool)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?,
+        ReportTargetType::GalleryImage => sqlx::query_scalar!(
+            r#"SELECT EXISTS(SELECT 1 FROM gallery_images WHERE id = $1) as "exists!: bool""#,
+            body.target_id
+        )
+        .fetch_one(&state.db_pool)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?,
     };
 
     if !target_exists {
