@@ -315,12 +315,16 @@ async fn handle_member_leave(
 ) -> Result<(StatusCode, Json<Option<MemberLeaveResponse>>), ApiError> {
     verify_system_token(&headers, &state.config.system_api_token)?;
 
-    // Validate discord_id
-    if body.discord_id.is_empty() || body.discord_id.len() > 20 {
+    // Validate discord_id: must be 17-20 digit numeric string (Discord snowflake)
+    if body.discord_id.is_empty()
+        || body.discord_id.len() < 17
+        || body.discord_id.len() > 20
+        || !body.discord_id.chars().all(|c| c.is_ascii_digit())
+    {
         let mut errors = HashMap::new();
         errors.insert(
             "discord_id".to_owned(),
-            "1〜20文字の数値を入力してください".to_owned(),
+            "17〜20桁の数値で入力してください".to_owned(),
         );
         return Err(ApiError::SystemValidation(errors));
     }
