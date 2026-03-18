@@ -125,9 +125,11 @@ struct ResolveReportResponse {
 
 // ===== Club management types =====
 
-#[derive(Deserialize)]
+#[derive(Deserialize, vrc_macros::Validate)]
 struct CreateClubRequest {
+    #[validate(min_length = 1, max_length = 100)]
     name: String,
+    #[validate(max_length = 2000)]
     description_markdown: Option<String>,
     owner_user_id: Uuid,
 }
@@ -149,9 +151,11 @@ struct UserBrief {
 
 // ===== Gallery management types =====
 
-#[derive(Deserialize)]
+#[derive(Deserialize, vrc_macros::Validate)]
 struct UploadGalleryRequest {
+    #[validate(max_length = 500)]
     image_url: String,
+    #[validate(max_length = 200)]
     caption: Option<String>,
 }
 
@@ -519,22 +523,8 @@ async fn create_club(
     auth: AuthenticatedUser<Staff>,
     Json(body): Json<CreateClubRequest>,
 ) -> Result<(StatusCode, Json<ClubResponse>), ApiError> {
-    let mut errors: HashMap<String, String> = HashMap::new();
-
-    if body.name.is_empty() || body.name.len() > 100 {
-        errors.insert("name".to_owned(), "1〜100文字で入力してください".to_owned());
-    }
-
-    if let Some(ref desc) = body.description_markdown {
-        if desc.len() > 2000 {
-            errors.insert(
-                "description_markdown".to_owned(),
-                "2000文字以内で入力してください".to_owned(),
-            );
-        }
-    }
-
-    if !errors.is_empty() {
+    // Validate fields via derive macro
+    if let Err(errors) = body.validate() {
         return Err(ApiError::ValidationError(errors));
     }
 
@@ -632,27 +622,15 @@ async fn upload_gallery_image(
     Path(club_id): Path<Uuid>,
     Json(body): Json<UploadGalleryRequest>,
 ) -> Result<(StatusCode, Json<GalleryUploadResponse>), ApiError> {
-    let mut errors: HashMap<String, String> = HashMap::new();
+    // Validate fields via derive macro (length checks on image_url and caption)
+    let mut errors = body.validate().err().unwrap_or_default();
 
-    if body.image_url.len() > 500 {
-        errors.insert(
-            "image_url".to_owned(),
-            "URLは500文字以内で入力してください".to_owned(),
-        );
-    } else if !is_valid_https_url(&body.image_url) {
+    // Stricter URL validation beyond basic length check
+    if errors.get("image_url").is_none() && !is_valid_https_url(&body.image_url) {
         errors.insert(
             "image_url".to_owned(),
             "有効なHTTPS URLを入力してください".to_owned(),
         );
-    }
-
-    if let Some(ref caption) = body.caption {
-        if caption.len() > 200 {
-            errors.insert(
-                "caption".to_owned(),
-                "200文字以内で入力してください".to_owned(),
-            );
-        }
     }
 
     if !errors.is_empty() {
