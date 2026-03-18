@@ -21,6 +21,15 @@ async fn main() {
         .with(fmt::layer().json())
         .init();
 
+    // Install Prometheus metrics recorder (must happen before any metrics are recorded)
+    let prometheus_builder = metrics_exporter_prometheus::PrometheusBuilder::new();
+    let prometheus_handle = prometheus_builder
+        .install_recorder()
+        .expect("Failed to install Prometheus recorder");
+    vrc_backend::METRICS_HANDLE
+        .set(prometheus_handle)
+        .expect("Metrics handle already initialised");
+
     let config = AppConfig::from_env().expect("Failed to load configuration");
     tracing::info!(
         bind_addr = %config.bind_address,
