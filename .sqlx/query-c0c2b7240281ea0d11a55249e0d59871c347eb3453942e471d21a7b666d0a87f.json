@@ -1,0 +1,61 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO events (external_source_id, title, description_markdown, description_html,\n                           host_user_id, host_name, event_status, start_time, end_time, location)\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)\n        ON CONFLICT (external_source_id) DO UPDATE SET\n            title = EXCLUDED.title,\n            description_markdown = EXCLUDED.description_markdown,\n            description_html = EXCLUDED.description_html,\n            host_user_id = EXCLUDED.host_user_id,\n            host_name = EXCLUDED.host_name,\n            event_status = EXCLUDED.event_status,\n            start_time = EXCLUDED.start_time,\n            end_time = EXCLUDED.end_time,\n            location = EXCLUDED.location,\n            updated_at = NOW()\n        RETURNING id, created_at, updated_at, (xmax = 0) as \"is_insert!: bool\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 2,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 3,
+        "name": "is_insert!: bool",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Uuid",
+        "Text",
+        {
+          "Custom": {
+            "name": "event_status",
+            "kind": {
+              "Enum": [
+                "draft",
+                "published",
+                "cancelled",
+                "archived"
+              ]
+            }
+          }
+        },
+        "Timestamptz",
+        "Timestamptz",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "c0c2b7240281ea0d11a55249e0d59871c347eb3453942e471d21a7b666d0a87f"
+}
