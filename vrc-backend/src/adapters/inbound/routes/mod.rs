@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::http::{Method, header};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
@@ -83,6 +84,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .nest("/api/v1/public", public_routes)
         .nest("/api/v1/system", system_routes)
         // Global layers applied to all routes (outermost first in execution)
+        .layer(DefaultBodyLimit::max(1_048_576)) // 1 MB request body limit
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .layer(MetricsLayer)
