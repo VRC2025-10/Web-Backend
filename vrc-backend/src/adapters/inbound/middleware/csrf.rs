@@ -97,29 +97,26 @@ where
                 return inner.call(req).await;
             }
 
-            {
-                    tracing::warn!(
-                        origin = ?origin,
-                        referer = ?referer,
-                        expected = ?allowed,
-                        "CSRF check failed: neither Origin nor Referer matched"
-                    );
+            tracing::warn!(
+                origin = ?origin,
+                referer = ?referer,
+                expected = ?allowed,
+                "CSRF check failed: neither Origin nor Referer matched"
+            );
 
-                    let body = json!({
-                        "error": "ERR-CSRF-001",
-                        "message": "CSRF verification failed.",
-                        "details": null,
-                    });
+            let body = json!({
+                "error": "ERR-CSRF-001",
+                "message": "CSRF verification failed.",
+                "details": null,
+            });
 
-                    let mut response =
-                        Response::new(Body::from(serde_json::to_string(&body).unwrap_or_default()));
-                    *response.status_mut() = StatusCode::FORBIDDEN;
-                    response
-                        .headers_mut()
-                        .insert("content-type", HeaderValue::from_static("application/json"));
-                    Ok(response)
-                }
-            }
+            let mut response =
+                Response::new(Body::from(serde_json::to_string(&body).unwrap_or_default()));
+            *response.status_mut() = StatusCode::FORBIDDEN;
+            response
+                .headers_mut()
+                .insert("content-type", HeaderValue::from_static("application/json"));
+            Ok(response)
         })
     }
 }
