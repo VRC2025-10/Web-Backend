@@ -124,19 +124,38 @@ async fn shutdown_signal() {
 }
 
 async fn bootstrap_super_admin(db_pool: &sqlx::PgPool, discord_id: &str) {
-    let result = sqlx::query(
+    // FR-AUTH-008: Upsert user with super_admin role
+    let result = sqlx::query_scalar::<_, uuid::Uuid>(
         r"
         INSERT INTO users (discord_id, discord_username, discord_display_name, role, status)
         VALUES ($1, 'SuperAdmin', 'SuperAdmin', 'super_admin', 'active')
         ON CONFLICT (discord_id) DO UPDATE SET role = 'super_admin'
+        RETURNING id
         ",
     )
     .bind(discord_id)
-    .execute(db_pool)
+    .fetch_one(db_pool)
     .await;
 
     match result {
-        Ok(_) => tracing::info!(discord_id = discord_id, "Super admin bootstrapped"),
+        Ok(user_id) => {
+            tracing::info!(discord_id = discord_id, user_id = %user_id, "Super admin bootstrapped");
+
+            // FR-AUTH-008: Create dummy profile if none exists
+            if let Err(e) = sqlx::query(
+                r"
+                INSERT INTO profiles (user_id, nickname, is_public, updated_at)
+                VALUES ($1, 'SuperAdmin', false, NOW())
+                ON CONFLICT (user_id) DO NOTHING
+                ",
+            )
+            .bind(user_id)
+            .execute(db_pool)
+            .await
+            {
+                tracing::warn!(error = %e, "Failed to bootstrap super admin profile");
+            }
+        }
         Err(e) => tracing::warn!(error = %e, "Failed to bootstrap super admin"),
     }
 }
