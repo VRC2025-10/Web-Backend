@@ -198,9 +198,8 @@ struct GalleryRow {
 
 async fn list_members(
     State(state): State<Arc<AppState>>,
-    Query(mut page): Query<PageRequest>,
+    Query(page): Query<PageRequest>,
 ) -> Result<Json<PageResponse<PublicMemberSummary>>, ApiError> {
-    page.validate();
 
     let rows = sqlx::query_as!(
         MemberRow,
@@ -257,7 +256,7 @@ async fn list_members(
         })
         .collect();
 
-    Ok(Json(PageResponse::new(items, count, page.per_page)))
+    Ok(Json(PageResponse::new(items, count, page.per_page())))
 }
 
 async fn get_member(
@@ -328,9 +327,8 @@ async fn get_member(
 
 async fn list_events(
     State(state): State<Arc<AppState>>,
-    Query(mut query): Query<EventListQuery>,
+    Query(query): Query<EventListQuery>,
 ) -> Result<Json<PageResponse<EventSummary>>, ApiError> {
-    query.page.validate();
     let now = Utc::now();
 
     // Public events only show published (or optionally filtered)
@@ -404,7 +402,7 @@ async fn list_events(
         })
         .collect();
 
-    Ok(Json(PageResponse::new(items, count, query.page.per_page)))
+    Ok(Json(PageResponse::new(items, count, query.page.per_page())))
 }
 
 async fn get_event(
@@ -460,9 +458,8 @@ async fn get_event(
 
 async fn list_clubs(
     State(state): State<Arc<AppState>>,
-    Query(mut page): Query<PageRequest>,
+    Query(page): Query<PageRequest>,
 ) -> Result<Json<PageResponse<ClubSummary>>, ApiError> {
-    page.validate();
 
     let rows = sqlx::query_as!(
         ClubListRow,
@@ -504,7 +501,7 @@ async fn list_clubs(
         })
         .collect();
 
-    Ok(Json(PageResponse::new(items, count, page.per_page)))
+    Ok(Json(PageResponse::new(items, count, page.per_page())))
 }
 
 async fn get_club(
@@ -568,9 +565,8 @@ async fn get_club(
 async fn list_gallery(
     State(state): State<Arc<AppState>>,
     Path(club_id): Path<Uuid>,
-    Query(mut page): Query<PageRequest>,
+    Query(page): Query<PageRequest>,
 ) -> Result<Json<PageResponse<GalleryImagePublic>>, ApiError> {
-    page.validate();
 
     // Verify club exists
     let exists = sqlx::query_scalar!(
@@ -632,7 +628,7 @@ async fn list_gallery(
         })
         .collect();
 
-    Ok(Json(PageResponse::new(items, count, page.per_page)))
+    Ok(Json(PageResponse::new(items, count, page.per_page())))
 }
 
 pub fn routes() -> Router<Arc<AppState>> {

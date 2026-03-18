@@ -311,9 +311,8 @@ async fn update_my_profile(
 async fn list_events(
     State(state): State<Arc<AppState>>,
     _auth: AuthenticatedUser<Member>,
-    Query(mut query): Query<EventListQuery>,
+    Query(query): Query<EventListQuery>,
 ) -> Result<Json<PageResponse<EventSummary>>, ApiError> {
-    query.page.validate();
     let now = Utc::now();
 
     let events = sqlx::query_as!(
@@ -387,7 +386,7 @@ async fn list_events(
         })
         .collect();
 
-    Ok(Json(PageResponse::new(items, count, query.page.per_page)))
+    Ok(Json(PageResponse::new(items, count, query.page.per_page())))
 }
 
 async fn create_report(

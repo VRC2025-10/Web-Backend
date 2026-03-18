@@ -212,9 +212,8 @@ struct ReportRow {
 async fn list_users(
     State(state): State<Arc<AppState>>,
     _auth: AuthenticatedUser<Admin>,
-    Query(mut query): Query<UserListQuery>,
+    Query(query): Query<UserListQuery>,
 ) -> Result<Json<PageResponse<AdminUserView>>, ApiError> {
-    query.page.validate();
 
     let rows = sqlx::query_as!(
         AdminUserRow,
@@ -265,7 +264,7 @@ async fn list_users(
         })
         .collect();
 
-    Ok(Json(PageResponse::new(items, count, query.page.per_page)))
+    Ok(Json(PageResponse::new(items, count, query.page.per_page())))
 }
 
 /// Validate role change authorization rules per spec:
@@ -416,9 +415,8 @@ async fn change_user_status(
 async fn list_reports(
     State(state): State<Arc<AppState>>,
     _auth: AuthenticatedUser<Staff>,
-    Query(mut query): Query<ReportListQuery>,
+    Query(query): Query<ReportListQuery>,
 ) -> Result<Json<PageResponse<AdminReportView>>, ApiError> {
-    query.page.validate();
 
     let rows = sqlx::query_as!(
         ReportRow,
@@ -471,7 +469,7 @@ async fn list_reports(
         })
         .collect();
 
-    Ok(Json(PageResponse::new(items, count, query.page.per_page)))
+    Ok(Json(PageResponse::new(items, count, query.page.per_page())))
 }
 
 async fn resolve_report(
