@@ -1,0 +1,44 @@
+{
+    email admin@example.com
+    servers {
+        protocols h1 h2 h3
+    }
+}
+
+your-domain.example.com {
+    # Security headers
+    header {
+        Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+        -Server
+    }
+
+    # Proxy to Axum backend
+    reverse_proxy app:3000 {
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+
+        # Health check
+        health_uri /health
+        health_interval 30s
+        health_timeout 5s
+    }
+
+    # Request size limit (1 MB)
+    request_body {
+        max_size 1MB
+    }
+
+    # Access log
+    log {
+        output file /data/access.log {
+            roll_size 100mb
+            roll_keep 5
+        }
+        format json
+    }
+}
