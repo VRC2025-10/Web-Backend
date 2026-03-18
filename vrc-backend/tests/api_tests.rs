@@ -23,6 +23,8 @@ use vrc_backend::config::AppConfig;
 
 // ===== Test helpers =====
 
+/// Create a fresh pool for each test. Each test run uses unique discord IDs
+/// so no TRUNCATE is needed between tests.
 async fn setup_pool() -> PgPool {
     let database_url =
         std::env::var("DATABASE_URL").unwrap_or_else(|_| {
@@ -39,14 +41,6 @@ async fn setup_pool() -> PgPool {
         .run(&pool)
         .await
         .expect("Failed to run migrations");
-
-    // Clean tables in FK-safe order
-    sqlx::query(
-        "TRUNCATE club_members, gallery_images, clubs, reports, event_tag_mappings, event_tags, events, sessions, profiles, users CASCADE",
-    )
-    .execute(&pool)
-    .await
-    .expect("Failed to clean test DB");
 
     pool
 }
@@ -74,17 +68,14 @@ fn test_config() -> AppConfig {
 }
 
 fn build_app(pool: PgPool) -> axum::Router {
-    // Install metrics recorder if not already installed
-    let _ = vrc_backend::METRICS_HANDLE.set({
-        metrics_exporter_prometheus::PrometheusBuilder::new()
-            .install_recorder()
-            .unwrap_or_else(|_| {
-                // Already installed from a previous test — get a dummy handle
-                // This is fine for tests; the recorder is global
-                metrics_exporter_prometheus::PrometheusBuilder::new()
-                    .build_recorder()
-                    .handle()
-            })
+    // Install metrics recorder if not already installed.
+    // Use build_recorder() to avoid starting a background HTTP listener in tests.
+    static METRICS_INIT: std::sync::Once = std::sync::Once::new();
+    METRICS_INIT.call_once(|| {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _ = metrics::set_global_recorder(recorder);
+        let _ = vrc_backend::METRICS_HANDLE.set(handle);
     });
 
     let state = Arc::new(AppState {
@@ -96,14 +87,21 @@ fn build_app(pool: PgPool) -> axum::Router {
     routes::build_router(state)
 }
 
+/// Generate a unique discord ID for test isolation.
+fn unique_discord_id() -> String {
+    Uuid::new_v4().to_string().replace('-', "")[..18].to_owned()
+}
+
 async fn create_test_user(pool: &PgPool, discord_id: &str, role: &str) -> Uuid {
-    sqlx::query_scalar(
-        &format!(
-            r"INSERT INTO users (discord_id, discord_username, discord_display_name, role, status)
-             VALUES ('{discord_id}', 'TestUser', 'TestUser_{discord_id}', '{role}', 'active')
-             RETURNING id"
-        )
+    sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO users (discord_id, discord_username, discord_display_name, role, status)
+         VALUES ($1, $2, $3, $4::user_role, 'active')
+         RETURNING id",
     )
+    .bind(discord_id)
+    .bind("TestUser")
+    .bind(format!("TestUser_{discord_id}"))
+    .bind(role)
     .fetch_one(pool)
     .await
     .expect("Failed to create test user")
@@ -181,7 +179,8 @@ async fn test_auth_me_without_session_returns_401() {
 #[tokio::test]
 async fn test_auth_me_returns_user_info() {
     let pool = setup_pool().await;
-    let user_id = create_test_user(&pool, "discord_111", "member").await;
+    let did = unique_discord_id();
+    let user_id = create_test_user(&pool, &did, "member").await;
     let session = create_test_session(&pool, user_id).await;
     let app = build_app(pool);
 
@@ -197,14 +196,15 @@ async fn test_auth_me_returns_user_info() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = parse_json(response).await;
-    assert_eq!(body["user"]["discord_id"], "discord_111");
+    assert_eq!(body["user"]["discord_id"], did);
     assert_eq!(body["user"]["role"], "member");
 }
 
 #[tokio::test]
 async fn test_suspended_user_returns_403() {
     let pool = setup_pool().await;
-    let user_id = create_test_user(&pool, "discord_222", "member").await;
+    let did = unique_discord_id();
+    let user_id = create_test_user(&pool, &did, "member").await;
     let session = create_test_session(&pool, user_id).await;
 
     // Suspend the user
@@ -234,7 +234,8 @@ async fn test_suspended_user_returns_403() {
 #[tokio::test]
 async fn test_update_profile_success() {
     let pool = setup_pool().await;
-    let user_id = create_test_user(&pool, "discord_333", "member").await;
+    let did = unique_discord_id();
+    let user_id = create_test_user(&pool, &did, "member").await;
     let session = create_test_session(&pool, user_id).await;
     let app = build_app(pool);
 
@@ -257,8 +258,9 @@ async fn test_update_profile_success() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let resp = parse_json(response).await;
+    assert_eq!(status, StatusCode::OK, "Profile update failed: {resp}");
     assert_eq!(resp["nickname"], "テストユーザー");
     assert!(resp["bio_html"].as_str().unwrap().contains("<h1>Hello</h1>"));
     assert_eq!(resp["is_public"], true);
@@ -267,7 +269,8 @@ async fn test_update_profile_success() {
 #[tokio::test]
 async fn test_update_profile_invalid_vrc_id() {
     let pool = setup_pool().await;
-    let user_id = create_test_user(&pool, "discord_444", "member").await;
+    let did = unique_discord_id();
+    let user_id = create_test_user(&pool, &did, "member").await;
     let session = create_test_session(&pool, user_id).await;
     let app = build_app(pool);
 
@@ -297,7 +300,8 @@ async fn test_update_profile_invalid_vrc_id() {
 #[tokio::test]
 async fn test_csrf_blocks_post_without_origin() {
     let pool = setup_pool().await;
-    let user_id = create_test_user(&pool, "discord_555", "member").await;
+    let did = unique_discord_id();
+    let user_id = create_test_user(&pool, &did, "member").await;
     let session = create_test_session(&pool, user_id).await;
     let app = build_app(pool);
 
