@@ -17,6 +17,7 @@ use crate::auth::roles::Member;
 use crate::domain::entities::event::EventStatus;
 use crate::domain::entities::report::ReportTargetType;
 use crate::domain::ports::services::markdown_renderer::MarkdownRenderer;
+use crate::domain::ports::services::webhook_sender::{EmbedField, WebhookSender};
 use crate::domain::value_objects::pagination::{PageRequest, PageResponse};
 use crate::errors::api::ApiError;
 
@@ -508,6 +509,39 @@ async fn create_report(
     .fetch_one(&state.db_pool)
     .await
     .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    // Notify staff channel about the new report
+    if let Some(ref webhook) = state.webhook {
+        let fields = vec![
+            EmbedField {
+                name: "Target Type".to_owned(),
+                value: format!("{:?}", report.target_type),
+                inline: true,
+            },
+            EmbedField {
+                name: "Target ID".to_owned(),
+                value: report.target_id.to_string(),
+                inline: true,
+            },
+            EmbedField {
+                name: "Reason".to_owned(),
+                value: body.reason.chars().take(200).collect(),
+                inline: false,
+            },
+        ];
+
+        if let Err(e) = webhook
+            .send_embed(
+                "🚨 New Report Submitted",
+                &format!("Report `{}` requires staff review.", report.id),
+                0xFEE75C, // Discord yellow
+                fields,
+            )
+            .await
+        {
+            tracing::error!(error = %e, report_id = %report.id, "Failed to send report webhook");
+        }
+    }
 
     Ok((
         StatusCode::CREATED,

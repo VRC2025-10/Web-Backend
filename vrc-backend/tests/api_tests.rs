@@ -56,7 +56,7 @@ fn test_config() -> AppConfig {
         backend_base_url: "http://localhost:3000".to_owned(),
         frontend_origin: "http://localhost:5173".to_owned(),
         session_secret: "test_secret_key_at_least_32_bytes_long".to_owned(),
-        system_api_token: "test_system_token_value".to_owned(),
+        system_api_token: "test_system_token_at_least_32_chars_long".to_owned(),
         session_max_age_secs: 604_800,
         session_cleanup_interval_secs: 3600,
         super_admin_discord_id: None,
@@ -81,6 +81,7 @@ fn build_app(pool: PgPool) -> axum::Router {
         http_client: reqwest::Client::new(),
         config: test_config(),
         start_time: Instant::now(),
+        webhook: None,
     });
     routes::build_router(state)
 }
@@ -352,12 +353,35 @@ async fn test_metrics_endpoint() {
     let pool = setup_pool().await;
     let app = build_app(pool);
 
+    // Metrics endpoint now requires Bearer token authentication
+    let response = app
+        .oneshot(
+            Request::get("/metrics")
+                .header(
+                    "authorization",
+                    "Bearer test_system_token_at_least_32_chars_long",
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_metrics_endpoint_unauthorized() {
+    let pool = setup_pool().await;
+    let app = build_app(pool);
+
+    // Metrics endpoint without token should return 401
     let response = app
         .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

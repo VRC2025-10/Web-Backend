@@ -15,6 +15,7 @@ use crate::adapters::outbound::markdown::renderer::PulldownCmarkRenderer;
 use crate::domain::entities::event::EventStatus;
 use crate::domain::entities::user::UserStatus;
 use crate::domain::ports::services::markdown_renderer::MarkdownRenderer;
+use crate::domain::ports::services::webhook_sender::{EmbedField, WebhookSender};
 use crate::errors::api::ApiError;
 
 // ===== System token verification =====
@@ -286,6 +287,56 @@ async fn upsert_event(
         "Event synced"
     );
 
+    // Send Discord webhook notification for newly created events only
+    if row.is_insert {
+        if let Some(ref webhook) = state.webhook {
+            let mut fields = vec![
+                EmbedField {
+                    name: "Host".to_owned(),
+                    value: if host_name.is_empty() {
+                        "TBD".to_owned()
+                    } else {
+                        host_name.clone()
+                    },
+                    inline: true,
+                },
+                EmbedField {
+                    name: "Start".to_owned(),
+                    value: body.start_time.format("%Y-%m-%d %H:%M UTC").to_string(),
+                    inline: true,
+                },
+            ];
+            if let Some(ref loc) = body.location {
+                fields.push(EmbedField {
+                    name: "Location".to_owned(),
+                    value: loc.clone(),
+                    inline: true,
+                });
+            }
+
+            // Fire-and-forget: webhook failures must not break the API response
+            let desc_preview: String = body
+                .description_markdown
+                .as_deref()
+                .unwrap_or("")
+                .chars()
+                .take(200)
+                .collect();
+
+            if let Err(e) = webhook
+                .send_embed(
+                    &format!("🎉 New Event: {}", body.title),
+                    &desc_preview,
+                    0x5865F2, // Discord blurple
+                    fields,
+                )
+                .await
+            {
+                tracing::error!(error = %e, event_id = %event_id, "Failed to send event webhook");
+            }
+        }
+    }
+
     Ok((
         http_status,
         Json(EventUpsertResponse {
@@ -401,6 +452,44 @@ async fn handle_member_leave(
         clubs_removed = clubs_removed,
         "Member leave processed"
     );
+
+    // Notify admin channel about the member leave
+    if let Some(ref webhook) = state.webhook {
+        let fields = vec![
+            EmbedField {
+                name: "Discord ID".to_owned(),
+                value: body.discord_id.clone(),
+                inline: true,
+            },
+            EmbedField {
+                name: "Previous Status".to_owned(),
+                value: format!("{previous_status:?}"),
+                inline: true,
+            },
+            EmbedField {
+                name: "Sessions Cleared".to_owned(),
+                value: sessions_deleted.to_string(),
+                inline: true,
+            },
+            EmbedField {
+                name: "Clubs Removed".to_owned(),
+                value: clubs_removed.to_string(),
+                inline: true,
+            },
+        ];
+
+        if let Err(e) = webhook
+            .send_embed(
+                "👋 Member Left Server",
+                &format!("User `{user_id}` has been suspended after leaving the Discord server."),
+                0xED4245, // Discord red
+                fields,
+            )
+            .await
+        {
+            tracing::error!(error = %e, user_id = %user_id, "Failed to send member leave webhook");
+        }
+    }
 
     Ok((
         StatusCode::OK,
