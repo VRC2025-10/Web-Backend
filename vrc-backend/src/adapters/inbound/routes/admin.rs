@@ -393,9 +393,17 @@ async fn change_user_status(
 
     // If suspending, invalidate all sessions for the user
     if body.status == UserStatus::Suspended {
-        let _ = sqlx::query!("DELETE FROM sessions WHERE user_id = $1", user_id)
+        if let Err(e) = sqlx::query!("DELETE FROM sessions WHERE user_id = $1", user_id)
             .execute(&state.db_pool)
-            .await;
+            .await
+        {
+            tracing::error!(
+                error = %e,
+                user_id = %user_id,
+                "Failed to invalidate sessions during user suspension"
+            );
+            return Err(ApiError::Internal("Failed to invalidate sessions".to_owned()));
+        }
     }
 
     tracing::info!(
