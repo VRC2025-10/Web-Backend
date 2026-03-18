@@ -277,19 +277,28 @@ async fn update_my_profile(
         return Err(ApiError::ProfileValidation(errors));
     }
 
-    // Render markdown to HTML
-    let renderer = PulldownCmarkRenderer::new();
     let bio_markdown = body.bio_markdown.unwrap_or_default();
-    let bio_html = renderer.render(&bio_markdown);
 
-    // Post-sanitization XSS check
-    let lower_html = bio_html.to_lowercase();
-    if lower_html.contains("javascript:")
-        || lower_html.contains("data:")
-        || lower_html.contains("vbscript:")
+    // Pre-sanitization XSS check on raw markdown input.
+    // Ammonia will strip dangerous protocols from the rendered HTML, but rejecting
+    // obviously malicious input early gives the user a clear error message and logs
+    // the attempt for security auditing.
+    let lower_md = bio_markdown.to_lowercase();
+    if lower_md.contains("javascript:")
+        || lower_md.contains("vbscript:")
+        || lower_md.contains("onerror")
+        || lower_md.contains("onload")
     {
+        tracing::warn!(
+            user_id = %auth.user.id,
+            "Rejected bio containing suspicious payload"
+        );
         return Err(ApiError::BioDangerous);
     }
+
+    // Render markdown to HTML (ammonia sanitizes the output)
+    let renderer = PulldownCmarkRenderer::new();
+    let bio_html = renderer.render(&bio_markdown);
 
     // UPSERT profile
     let profile = sqlx::query_as!(
