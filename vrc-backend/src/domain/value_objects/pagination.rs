@@ -178,7 +178,7 @@ mod proptests {
         /// P5b: total_pages * per_page >= total_count.
         #[test]
         fn pagination_total_pages_correct(
-            total_count in 0i64..=100000,
+            total_count in 0i64..=100_000,
             per_page in 1u32..=100,
         ) {
             let resp: PageResponse<String> = PageResponse::new(vec![], total_count, per_page);
