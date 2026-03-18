@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE events\n            SET event_status = 'archived', updated_at = now()\n            WHERE event_status = 'published'\n              AND (\n                  (end_time IS NOT NULL AND end_time < now() - INTERVAL '30 days')\n                  OR\n                  (end_time IS NULL AND start_time < now() - INTERVAL '60 days')\n              )\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "77c85cdf4be2f241e4db2a46126059b2afaa66c5e13037e73cd437f0a7d5777c"
+}
