@@ -185,12 +185,15 @@ async fn logout(
         hasher.update(&token_bytes);
         let token_hash = hasher.finalize().to_vec();
 
-        let _ = sqlx::query!(
+        if let Err(e) = sqlx::query!(
             "DELETE FROM sessions WHERE token_hash = $1",
             &token_hash[..]
         )
         .execute(&state.db_pool)
-        .await;
+        .await
+        {
+            tracing::error!(error = %e, "Failed to delete session during logout");
+        }
     }
 
     let remove_cookie = axum_extra::extract::cookie::Cookie::build(("session_id", ""))
