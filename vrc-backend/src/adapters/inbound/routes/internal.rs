@@ -248,26 +248,28 @@ async fn update_my_profile(
 
     let bio_markdown = body.bio_markdown.unwrap_or_default();
 
-    // Pre-sanitization XSS check on raw markdown input.
-    // Ammonia will strip dangerous protocols from the rendered HTML, but rejecting
-    // obviously malicious input early gives the user a clear error message and logs
-    // the attempt for security auditing.
-    let lower_md = bio_markdown.to_lowercase();
-    if lower_md.contains("javascript:")
-        || lower_md.contains("vbscript:")
-        || lower_md.contains("onerror")
-        || lower_md.contains("onload")
-    {
-        tracing::warn!(
-            user_id = %auth.user.id,
-            "Rejected bio containing suspicious payload"
-        );
-        return Err(ApiError::BioDangerous);
-    }
-
     // Render markdown to HTML (ammonia sanitizes the output)
     let renderer = PulldownCmarkRenderer::new();
     let bio_html = renderer.render(&bio_markdown);
+
+    // Post-sanitization defense-in-depth XSS check on the rendered HTML output.
+    // Ammonia should strip dangerous content, but we reject the input entirely if
+    // any suspicious patterns survive sanitization. This catches hypothetical
+    // ammonia bypasses and logs the attempt for security auditing.
+    let lower_html = bio_html.to_lowercase();
+    if lower_html.contains("<script")
+        || lower_html.contains("javascript:")
+        || lower_html.contains("vbscript:")
+        || regex_lite::Regex::new(r"on\w+=")
+            .expect("valid regex")
+            .is_match(&lower_html)
+    {
+        tracing::warn!(
+            user_id = %auth.user.id,
+            "Rejected bio: suspicious payload detected in rendered HTML"
+        );
+        return Err(ApiError::BioDangerous);
+    }
 
     // UPSERT profile
     let profile = sqlx::query_as!(
