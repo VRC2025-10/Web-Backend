@@ -187,3 +187,39 @@ mod proptests {
         }
     }
 }
+
+// Kani formal verification harnesses for pagination arithmetic.
+// Run with: cargo kani --harness proof_pagination_offset_no_overflow
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// P2: Pagination offset never overflows for valid inputs.
+    #[kani::proof]
+    fn proof_pagination_offset_no_overflow() {
+        let page: u32 = kani::any();
+        let per_page: u32 = kani::any();
+
+        kani::assume(page >= 1 && page <= 10_000);
+        kani::assume(per_page >= 1 && per_page <= 100);
+
+        let req = PageRequest { page, per_page };
+        let offset = req.offset();
+        assert!(offset >= 0);
+        assert!(offset == i64::from(page - 1) * i64::from(per_page));
+    }
+
+    /// P2b: Total pages calculation never overflows.
+    #[kani::proof]
+    fn proof_total_pages_no_overflow() {
+        let total_count: i64 = kani::any();
+        let per_page: u32 = kani::any();
+
+        kani::assume(total_count >= 0 && total_count <= 1_000_000);
+        kani::assume(per_page >= 1 && per_page <= 100);
+
+        let resp: PageResponse<u8> = PageResponse::new(vec![], total_count, per_page);
+        assert!(resp.total_pages >= 0);
+        assert!(resp.total_pages * i64::from(per_page) >= total_count);
+    }
+}

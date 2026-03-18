@@ -372,3 +372,35 @@ mod proptests {
         }
     }
 }
+
+// Kani formal verification harness for redirect validation.
+// Run with: cargo kani --harness proof_redirect_always_relative
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// P3: Redirect validation always produces a safe relative path.
+    /// For any byte sequence that is valid UTF-8, the output starts with '/',
+    /// contains no doubled slashes, and no backslashes.
+    #[kani::proof]
+    #[kani::unwind(34)] // Bound string length + 2 for termination
+    fn proof_redirect_always_relative() {
+        let len: usize = kani::any();
+        kani::assume(len <= 32);
+
+        let mut input = Vec::with_capacity(len);
+        for _ in 0..len {
+            input.push(kani::any::<u8>());
+        }
+
+        if let Ok(s) = std::str::from_utf8(&input) {
+            let result = validate_redirect(s);
+            assert!(result.starts_with('/'));
+            assert!(!result.contains("//"));
+            assert!(!result.contains('\\'));
+            if result.len() >= 2 {
+                assert!(result.as_bytes()[1] != b'/');
+            }
+        }
+    }
+}

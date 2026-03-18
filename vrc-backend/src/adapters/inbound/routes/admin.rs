@@ -802,3 +802,75 @@ mod tests {
         assert!(validate_role_change(UserRole::Admin, UserRole::Staff, UserRole::Member).is_ok());
     }
 }
+
+// Kani formal verification harnesses for role change authorization.
+// Run with: cargo kani --harness proof_role_change_no_escalation
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    fn any_role() -> UserRole {
+        let v: u8 = kani::any();
+        kani::assume(v < 4);
+        match v {
+            0 => UserRole::Member,
+            1 => UserRole::Staff,
+            2 => UserRole::Admin,
+            _ => UserRole::SuperAdmin,
+        }
+    }
+
+    /// P1: If a role change is allowed, the actor must have sufficient privilege.
+    /// Specifically, actor.level() >= new_role.level().
+    #[kani::proof]
+    fn proof_role_change_no_escalation() {
+        let actor_role = any_role();
+        let target_current_role = any_role();
+        let new_role = any_role();
+
+        if validate_role_change(actor_role, target_current_role, new_role).is_ok() {
+            assert!(actor_role.level() >= new_role.level());
+        }
+    }
+
+    /// P1b: Admin cannot grant admin or super_admin.
+    #[kani::proof]
+    fn proof_admin_cannot_grant_admin_or_above() {
+        let target_current_role = any_role();
+        let new_role = any_role();
+        kani::assume(new_role == UserRole::Admin || new_role == UserRole::SuperAdmin);
+
+        let result = validate_role_change(UserRole::Admin, target_current_role, new_role);
+        assert!(result.is_err());
+    }
+
+    /// P1c: After any allowed role change among 3 users, at least one super_admin remains.
+    #[kani::proof]
+    fn proof_super_admin_always_exists() {
+        let roles: [UserRole; 3] = [any_role(), any_role(), any_role()];
+        let actor_idx: usize = kani::any();
+        let target_idx: usize = kani::any();
+        let new_role = any_role();
+        kani::assume(actor_idx < 3 && target_idx < 3 && actor_idx != target_idx);
+
+        let sa_count = roles.iter().filter(|r| **r == UserRole::SuperAdmin).count();
+        kani::assume(sa_count >= 1);
+
+        if validate_role_change(roles[actor_idx], roles[target_idx], new_role).is_ok() {
+            let mut new_roles = roles;
+            new_roles[target_idx] = new_role;
+            let new_sa_count = new_roles.iter().filter(|r| **r == UserRole::SuperAdmin).count();
+            assert!(new_sa_count >= 1, "Role change must not eliminate all super_admins");
+        }
+    }
+
+    /// P1d: Member and staff can never change roles.
+    #[kani::proof]
+    fn proof_member_staff_cannot_change_roles() {
+        let target_role = any_role();
+        let new_role = any_role();
+
+        assert!(validate_role_change(UserRole::Member, target_role, new_role).is_err());
+        assert!(validate_role_change(UserRole::Staff, target_role, new_role).is_err());
+    }
+}

@@ -70,3 +70,7 @@ module_name_repetitions = "allow"
 must_use_candidate = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
+
+[lints.rust]
+# Kani sets this cfg when running formal verification
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
