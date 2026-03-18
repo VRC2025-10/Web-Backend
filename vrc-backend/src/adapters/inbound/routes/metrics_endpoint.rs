@@ -5,6 +5,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::get;
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use crate::AppState;
@@ -15,22 +16,22 @@ pub fn routes() -> Router<Arc<AppState>> {
 
 /// Expose Prometheus-format metrics at `/metrics`.
 ///
-/// Protected by the system API token (Bearer authentication) to prevent
-/// information disclosure of request patterns, paths, and status codes.
+/// Protected by the system API token (Bearer authentication) with SHA-256
+/// hashing + constant-time comparison (NFR-SEC-004) to prevent timing attacks
+/// and information disclosure of request patterns, paths, and status codes.
 async fn metrics_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    // Require Bearer token matching SYSTEM_API_TOKEN
+    // Require Bearer token matching SYSTEM_API_TOKEN via SHA-256 + constant-time eq
     let authorized = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .is_some_and(|token| {
-            token
-                .as_bytes()
-                .ct_eq(state.config.system_api_token.as_bytes())
-                .into()
+            let token_hash = Sha256::digest(token.as_bytes());
+            let expected_hash = Sha256::digest(state.config.system_api_token.as_bytes());
+            token_hash.ct_eq(&expected_hash).into()
         });
 
     if !authorized {

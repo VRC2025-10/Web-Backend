@@ -7,6 +7,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
@@ -20,7 +21,11 @@ use crate::errors::api::ApiError;
 
 // ===== System token verification =====
 
-/// Verify Bearer token via constant-time comparison to prevent timing attacks.
+/// Verify Bearer token via SHA-256 hashing + constant-time comparison (NFR-SEC-004).
+///
+/// Both the incoming token and the expected token are hashed before comparison.
+/// This ensures the comparison always operates on fixed-length 32-byte digests,
+/// preventing any length-related timing leakage.
 fn verify_system_token(headers: &HeaderMap, expected: &str) -> Result<(), ApiError> {
     let auth_header = headers
         .get("authorization")
@@ -31,7 +36,10 @@ fn verify_system_token(headers: &HeaderMap, expected: &str) -> Result<(), ApiErr
         .strip_prefix("Bearer ")
         .ok_or(ApiError::SystemTokenInvalid)?;
 
-    if token.as_bytes().ct_eq(expected.as_bytes()).into() {
+    let token_hash = Sha256::digest(token.as_bytes());
+    let expected_hash = Sha256::digest(expected.as_bytes());
+
+    if token_hash.ct_eq(&expected_hash).into() {
         Ok(())
     } else {
         Err(ApiError::SystemTokenInvalid)
