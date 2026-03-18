@@ -28,6 +28,7 @@ struct PublicProfileSummary {
     nickname: Option<String>,
     vrc_id: Option<String>,
     x_id: Option<String>,
+    bio_summary: Option<String>,
     bio_html: Option<String>,
     avatar_url: Option<String>,
 }
@@ -142,6 +143,7 @@ struct MemberRow {
     nickname: Option<String>,
     vrc_id: Option<String>,
     x_id: Option<String>,
+    bio_markdown: Option<String>,
     bio_html: Option<String>,
     avatar_url: Option<String>,
 }
@@ -194,6 +196,120 @@ struct GalleryRow {
     created_at: DateTime<Utc>,
 }
 
+// ===== Helpers =====
+
+/// FR-PROF-006: Convert raw markdown to a plain-text summary of at most 120 characters.
+///
+/// Strips common markdown syntax (headings, bold, italic, links, images, code),
+/// normalises whitespace, and appends "..." when the result is truncated.
+fn truncate_bio(md: &str) -> String {
+    // Strip markdown syntax to approximate plain text
+    let mut plain = String::with_capacity(md.len());
+    let mut chars = md.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            // Skip heading markers at start of line
+            '#' => {
+                while chars.peek() == Some(&'#') {
+                    chars.next();
+                }
+                // Skip optional space after heading markers
+                if chars.peek() == Some(&' ') {
+                    chars.next();
+                }
+            }
+            // Bold/italic markers
+            '*' | '_' => {}
+            // Inline code
+            '`' => {}
+            // Links: [text](url) → keep text
+            '[' => {
+                let mut depth = 1;
+                let mut link_text = String::new();
+                for c in chars.by_ref() {
+                    if c == '[' {
+                        depth += 1;
+                    }
+                    if c == ']' {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    link_text.push(c);
+                }
+                // Skip the (url) portion if present
+                if chars.peek() == Some(&'(') {
+                    chars.next();
+                    let mut paren_depth = 1;
+                    for c in chars.by_ref() {
+                        if c == '(' {
+                            paren_depth += 1;
+                        }
+                        if c == ')' {
+                            paren_depth -= 1;
+                            if paren_depth == 0 {
+                                break;
+                            }
+                        }
+                    }
+                }
+                plain.push_str(&link_text);
+            }
+            // Images: ![alt](url) → skip entirely
+            '!' if chars.peek() == Some(&'[') => {
+                chars.next(); // skip '['
+                let mut depth = 1;
+                for c in chars.by_ref() {
+                    if c == '[' {
+                        depth += 1;
+                    }
+                    if c == ']' {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                }
+                if chars.peek() == Some(&'(') {
+                    chars.next();
+                    let mut p = 1;
+                    for c in chars.by_ref() {
+                        if c == '(' {
+                            p += 1;
+                        }
+                        if c == ')' {
+                            p -= 1;
+                            if p == 0 {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            // Collapse newlines and carriage returns into space
+            '\n' | '\r' => {
+                if !plain.ends_with(' ') {
+                    plain.push(' ');
+                }
+            }
+            _ => plain.push(ch),
+        }
+    }
+
+    // Normalise repeated whitespace
+    let normalised: String = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    if normalised.chars().count() <= 120 {
+        normalised
+    } else {
+        // Truncate at 120-char boundary (char-aware for multi-byte)
+        let truncated: String = normalised.chars().take(120).collect();
+        format!("{truncated}...")
+    }
+}
+
 // ===== Handlers =====
 
 async fn list_members(
@@ -206,7 +322,7 @@ async fn list_members(
         r#"
         SELECT u.discord_id, u.discord_display_name, u.discord_avatar_hash,
                u.joined_at,
-               p.nickname, p.vrc_id, p.x_id, p.bio_html, p.avatar_url
+               p.nickname, p.vrc_id, p.x_id, p.bio_markdown, p.bio_html, p.avatar_url
         FROM users u
         LEFT JOIN profiles p ON p.user_id = u.id AND p.is_public = true
         WHERE u.status = 'active'
@@ -246,6 +362,7 @@ async fn list_members(
                         nickname: r.nickname,
                         vrc_id: r.vrc_id,
                         x_id: r.x_id,
+                        bio_summary: r.bio_markdown.as_deref().map(truncate_bio),
                         bio_html: r.bio_html,
                         avatar_url: r.avatar_url,
                     })
