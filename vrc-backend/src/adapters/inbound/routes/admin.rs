@@ -20,6 +20,30 @@ use crate::domain::ports::services::markdown_renderer::MarkdownRenderer;
 use crate::domain::value_objects::pagination::{PageRequest, PageResponse};
 use crate::errors::api::ApiError;
 
+/// Validate that a string is a well-formed HTTPS URL with a non-empty host.
+///
+/// Rejects bare schemes, `localhost`, and IP-based hosts to prevent SSRF when
+/// the URL is later rendered or fetched.
+fn is_valid_https_url(url: &str) -> bool {
+    if !url.starts_with("https://") {
+        return false;
+    }
+    // Must have content after "https://"
+    let rest = &url[8..];
+    if rest.is_empty() {
+        return false;
+    }
+    // Extract host portion (before first '/' or end of string)
+    let host = rest.split('/').next().unwrap_or("");
+    // Host must not be empty, localhost, or bare IP
+    if host.is_empty() || host.starts_with("localhost") || host.starts_with("127.") {
+        return false;
+    }
+    // Must contain at least one dot (reject single-label hosts)
+    let host_without_port = host.split(':').next().unwrap_or("");
+    host_without_port.contains('.')
+}
+
 // ===== User management types =====
 
 #[derive(Deserialize)]
@@ -610,7 +634,12 @@ async fn upload_gallery_image(
 ) -> Result<(StatusCode, Json<GalleryUploadResponse>), ApiError> {
     let mut errors: HashMap<String, String> = HashMap::new();
 
-    if !body.image_url.starts_with("https://") || body.image_url.len() > 500 {
+    if body.image_url.len() > 500 {
+        errors.insert(
+            "image_url".to_owned(),
+            "URLは500文字以内で入力してください".to_owned(),
+        );
+    } else if !is_valid_https_url(&body.image_url) {
         errors.insert(
             "image_url".to_owned(),
             "有効なHTTPS URLを入力してください".to_owned(),
