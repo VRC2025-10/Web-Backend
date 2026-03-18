@@ -624,7 +624,7 @@ async fn upload_gallery_image(
     let mut errors = body.validate().err().unwrap_or_default();
 
     // Stricter URL validation beyond basic length check
-    if errors.get("image_url").is_none() && !is_valid_https_url(&body.image_url) {
+    if !errors.contains_key("image_url") && !is_valid_https_url(&body.image_url) {
         errors.insert(
             "image_url".to_owned(),
             "有効なHTTPS URLを入力してください".to_owned(),

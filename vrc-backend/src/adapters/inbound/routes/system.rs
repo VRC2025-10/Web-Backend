@@ -123,13 +123,13 @@ async fn upsert_event(
         }
     }
 
-    if let Some(end_time) = body.end_time {
-        if end_time <= body.start_time {
-            errors.insert(
-                "end_time".to_owned(),
-                "end_time は start_time より後にしてください".to_owned(),
-            );
-        }
+    if let Some(end_time) = body.end_time
+        && end_time <= body.start_time
+    {
+        errors.insert(
+            "end_time".to_owned(),
+            "end_time は start_time より後にしてください".to_owned(),
+        );
     }
 
     if !errors.is_empty() {
@@ -261,8 +261,9 @@ async fn upsert_event(
     );
 
     // Send Discord webhook notification for newly created events only
-    if row.is_insert {
-        if let Some(ref webhook) = state.webhook {
+    if row.is_insert
+        && let Some(ref webhook) = state.webhook
+    {
             let mut fields = vec![
                 EmbedField {
                     name: "Host".to_owned(),
@@ -307,7 +308,6 @@ async fn upsert_event(
             {
                 tracing::error!(error = %e, event_id = %event_id, "Failed to send event webhook");
             }
-        }
     }
 
     Ok((

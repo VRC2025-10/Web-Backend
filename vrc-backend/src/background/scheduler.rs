@@ -56,8 +56,8 @@ async fn session_cleanup_loop(pool: PgPool, interval_secs: u64) {
 
 /// Archive published events that are older than their retention threshold.
 ///
-/// Events with an `end_time` are archived 30 days after end_time.
-/// Events without `end_time` (open-ended) are archived 60 days after start_time
+/// Events with an `end_time` are archived 30 days after `end_time`.
+/// Events without `end_time` (open-ended) are archived 60 days after `start_time`
 /// to prevent indefinite accumulation in the active event list.
 ///
 /// Runs once per hour with exponential backoff on failures.

@@ -79,16 +79,14 @@ where
         Box::pin(async move {
             let origin_matches = origin
                 .as_ref()
-                .map(|o| o == &allowed)
-                .unwrap_or(false);
+                .is_some_and(|o| o == &allowed);
 
             // Fall back to Referer: extract scheme+host origin prefix and compare
             let referer_matches = if !origin_matches {
                 referer
                     .as_ref()
                     .and_then(|r| r.to_str().ok())
-                    .map(|r| extract_origin_from_url(r) == allowed.to_str().unwrap_or(""))
-                    .unwrap_or(false)
+                    .is_some_and(|r| extract_origin_from_url(r) == allowed.to_str().unwrap_or(""))
             } else {
                 false
             };
