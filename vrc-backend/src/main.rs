@@ -5,6 +5,7 @@ use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberI
 
 use vrc_backend::AppState;
 use vrc_backend::adapters::inbound::routes;
+use vrc_backend::adapters::outbound::discord::webhook::DiscordWebhookSender;
 use vrc_backend::background::scheduler;
 use vrc_backend::config::AppConfig;
 
@@ -59,11 +60,17 @@ async fn main() {
         .build()
         .expect("Failed to create HTTP client");
 
+    let webhook = config.discord_webhook_url.as_ref().map(|url| {
+        tracing::info!("Discord webhook notifications enabled");
+        DiscordWebhookSender::new(http_client.clone(), url.clone())
+    });
+
     let state = std::sync::Arc::new(AppState {
         db_pool: db_pool.clone(),
         http_client,
         config,
         start_time: Instant::now(),
+        webhook,
     });
 
     // Start background tasks
