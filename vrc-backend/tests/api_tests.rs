@@ -1,8 +1,8 @@
 /// Integration tests for the VRC Backend API.
 ///
-/// These tests require a running PostgreSQL instance.
+/// These tests require a running `PostgreSQL` instance.
 /// Set `DATABASE_URL` env var or use the default test database:
-///   postgres://vrc:vrc_dev_password@localhost:5432/vrc_backend
+///   <postgres://vrc:vrc_dev_password@localhost:5432/vrc_backend>
 ///
 /// Run with: `cargo test --test api_tests -- --test-threads=1`
 use std::sync::Arc;
