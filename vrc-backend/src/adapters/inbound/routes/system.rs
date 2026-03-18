@@ -40,15 +40,19 @@ fn verify_system_token(headers: &HeaderMap, expected: &str) -> Result<(), ApiErr
 
 // ===== Event sync types =====
 
-#[derive(Deserialize)]
+#[derive(Deserialize, vrc_macros::Validate)]
 struct EventUpsertRequest {
+    #[validate(min_length = 1, max_length = 100)]
     external_id: String,
+    #[validate(min_length = 1, max_length = 200)]
     title: String,
+    #[validate(max_length = 2000)]
     description_markdown: Option<String>,
     status: EventStatus,
     host_discord_id: Option<String>,
     start_time: DateTime<Utc>,
     end_time: Option<DateTime<Utc>>,
+    #[validate(max_length = 200)]
     location: Option<String>,
     tags: Option<Vec<String>>,
 }
@@ -100,41 +104,10 @@ async fn upsert_event(
 ) -> Result<(StatusCode, Json<EventUpsertResponse>), ApiError> {
     verify_system_token(&headers, &state.config.system_api_token)?;
 
-    // Validate fields
-    let mut errors: HashMap<String, String> = HashMap::new();
+    // Validate simple field constraints via derive macro
+    let mut errors = body.validate().err().unwrap_or_default();
 
-    if body.external_id.is_empty() || body.external_id.len() > 100 {
-        errors.insert(
-            "external_id".to_owned(),
-            "1〜100文字で入力してください".to_owned(),
-        );
-    }
-
-    if body.title.is_empty() || body.title.len() > 200 {
-        errors.insert(
-            "title".to_owned(),
-            "1〜200文字で入力してください".to_owned(),
-        );
-    }
-
-    if let Some(ref desc) = body.description_markdown {
-        if desc.len() > 2000 {
-            errors.insert(
-                "description_markdown".to_owned(),
-                "2000文字以内で入力してください".to_owned(),
-            );
-        }
-    }
-
-    if let Some(ref location) = body.location {
-        if location.len() > 200 {
-            errors.insert(
-                "location".to_owned(),
-                "200文字以内で入力してください".to_owned(),
-            );
-        }
-    }
-
+    // Cross-field and collection validations that the macro cannot express
     if let Some(ref tags) = body.tags {
         if tags.len() > 10 {
             errors.insert("tags".to_owned(), "タグは最大10個までです".to_owned());
