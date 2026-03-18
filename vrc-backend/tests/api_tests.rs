@@ -59,6 +59,7 @@ fn test_config() -> AppConfig {
         system_api_token: "test_system_token_at_least_32_chars_long".to_owned(),
         session_max_age_secs: 604_800,
         session_cleanup_interval_secs: 3600,
+        event_archival_interval_secs: 3600,
         super_admin_discord_id: None,
         discord_webhook_url: None,
         cookie_secure: false,
