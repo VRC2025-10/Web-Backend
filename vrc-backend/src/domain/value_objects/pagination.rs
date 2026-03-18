@@ -155,3 +155,35 @@ mod tests {
         assert_eq!(resp.total_pages, 1);
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// P5: Pagination offset is always non-negative.
+        #[test]
+        fn pagination_offset_never_negative(
+            page in 1u32..=10000,
+            per_page in 1u32..=100,
+        ) {
+            let req = PageRequest { page, per_page };
+            prop_assert!(req.offset() >= 0);
+        }
+
+        /// P5b: total_pages * per_page >= total_count.
+        #[test]
+        fn pagination_total_pages_correct(
+            total_count in 0i64..=100000,
+            per_page in 1u32..=100,
+        ) {
+            let resp: PageResponse<String> = PageResponse::new(vec![], total_count, per_page);
+            prop_assert!(resp.total_pages >= 0);
+            if total_count > 0 {
+                prop_assert!(resp.total_pages >= 1);
+            }
+            prop_assert!(resp.total_pages * i64::from(per_page) >= total_count);
+        }
+    }
+}

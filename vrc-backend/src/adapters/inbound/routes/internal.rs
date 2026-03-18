@@ -624,3 +624,49 @@ mod tests {
         assert!(url.len() > 500);
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// P2: Valid VRC IDs always match the pattern.
+        #[test]
+        fn valid_vrc_ids_match_pattern(
+            a in "[0-9a-f]{8}",
+            b in "[0-9a-f]{4}",
+            c in "[0-9a-f]{4}",
+            d in "[0-9a-f]{4}",
+            e in "[0-9a-f]{12}",
+        ) {
+            let id = format!("usr_{a}-{b}-{c}-{d}-{e}");
+            prop_assert!(VRC_ID_RE.is_match(&id));
+        }
+
+        /// P2b: Random strings without the usr_ prefix are rejected.
+        #[test]
+        fn random_strings_rejected_as_vrc_id(input in "\\PC{0,100}") {
+            if !input.starts_with("usr_") {
+                prop_assert!(!VRC_ID_RE.is_match(&input));
+            }
+        }
+
+        /// P3: Valid X IDs are accepted.
+        #[test]
+        fn valid_x_ids_accepted(id in "[a-zA-Z0-9_]{1,15}") {
+            prop_assert!(X_ID_RE.is_match(&id));
+        }
+
+        /// P3b: X IDs with special characters are rejected.
+        #[test]
+        fn x_ids_with_special_chars_rejected(
+            prefix in "[a-zA-Z0-9_]{0,7}",
+            bad_char in "[^a-zA-Z0-9_]",
+            suffix in "[a-zA-Z0-9_]{0,7}",
+        ) {
+            let input = format!("{prefix}{bad_char}{suffix}");
+            prop_assert!(!X_ID_RE.is_match(&input));
+        }
+    }
+}

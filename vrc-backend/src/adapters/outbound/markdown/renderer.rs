@@ -155,3 +155,23 @@ mod tests {
         assert!(!html.contains("evil.com"));
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// P1: Markdown rendering never produces dangerous HTML.
+        #[test]
+        fn markdown_never_produces_script_tags(input in "\\PC{0,500}") {
+            let renderer = PulldownCmarkRenderer::new();
+            let html = renderer.render(&input);
+            let lower = html.to_lowercase();
+            prop_assert!(!lower.contains("<script"));
+            prop_assert!(!lower.contains("javascript:"));
+            prop_assert!(!lower.contains("onerror="));
+            prop_assert!(!lower.contains("onload="));
+        }
+    }
+}

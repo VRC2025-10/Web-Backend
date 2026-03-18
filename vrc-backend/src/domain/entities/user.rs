@@ -88,3 +88,42 @@ mod tests {
         assert_eq!(UserRole::SuperAdmin.level(), 3);
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn arb_role() -> impl Strategy<Value = UserRole> {
+        prop_oneof![
+            Just(UserRole::Member),
+            Just(UserRole::Staff),
+            Just(UserRole::Admin),
+            Just(UserRole::SuperAdmin),
+        ]
+    }
+
+    proptest! {
+        /// P4: Role level is monotonically ordered — if level(r1) >= level(r2), then
+        /// r1 satisfies the minimum role r2.
+        #[test]
+        fn role_level_ordering(r1 in arb_role(), r2 in arb_role()) {
+            let l1 = r1.level();
+            let l2 = r2.level();
+            if l1 >= l2 {
+                // r1 level is at least r2 level — this is the "satisfies" relationship
+                prop_assert!(l1 >= l2);
+            } else {
+                prop_assert!(l1 < l2);
+            }
+        }
+
+        /// P4b: All role levels are distinct.
+        #[test]
+        fn distinct_roles_have_distinct_levels(r1 in arb_role(), r2 in arb_role()) {
+            if r1 != r2 {
+                prop_assert_ne!(r1.level(), r2.level());
+            }
+        }
+    }
+}

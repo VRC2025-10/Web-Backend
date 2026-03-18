@@ -353,3 +353,22 @@ mod tests {
         assert_eq!(validate_redirect("notapath"), "/");
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// P6: Redirect validation always returns a safe relative path.
+        #[test]
+        fn redirect_never_returns_absolute_url(input in "\\PC{0,200}") {
+            let result = validate_redirect(&input);
+            // Must start with '/' (relative) or be the default "/"
+            prop_assert!(result.starts_with('/'));
+            // Must not contain protocol-relative patterns
+            prop_assert!(!result.contains("//"));
+            prop_assert!(!result.contains('\\'));
+        }
+    }
+}
