@@ -1,4 +1,13 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// Raw wire format used only during deserialization.
+#[derive(Deserialize)]
+struct RawPageRequest {
+    #[serde(default = "default_page")]
+    page: u32,
+    #[serde(default = "default_per_page")]
+    per_page: u32,
+}
 
 fn default_page() -> u32 {
     1
@@ -7,21 +16,36 @@ fn default_per_page() -> u32 {
     20
 }
 
-#[derive(Debug, Clone, Deserialize)]
+/// Pagination parameters that are guaranteed valid after deserialization.
+/// `page >= 1` and `1 <= per_page <= 100` — enforced at construction time.
+#[derive(Debug, Clone)]
 pub struct PageRequest {
-    #[serde(default = "default_page")]
-    pub page: u32,
-    #[serde(default = "default_per_page")]
-    pub per_page: u32,
+    page: u32,
+    per_page: u32,
+}
+
+impl<'de> Deserialize<'de> for PageRequest {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = RawPageRequest::deserialize(deserializer)?;
+        Ok(Self::new(raw.page, raw.per_page))
+    }
 }
 
 impl PageRequest {
-    /// Validate and clamp pagination parameters.
-    pub fn validate(&mut self) {
-        if self.page == 0 {
-            self.page = 1;
+    /// Create a valid `PageRequest`, clamping out-of-range values.
+    pub fn new(page: u32, per_page: u32) -> Self {
+        Self {
+            page: if page == 0 { 1 } else { page },
+            per_page: per_page.clamp(1, 100),
         }
-        self.per_page = self.per_page.clamp(1, 100);
+    }
+
+    pub fn page(&self) -> u32 {
+        self.page
+    }
+
+    pub fn per_page(&self) -> u32 {
+        self.per_page
     }
 
     pub fn offset(&self) -> i64 {
@@ -69,59 +93,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_validate_clamps_page_zero_to_one() {
-        let mut req = PageRequest {
-            page: 0,
-            per_page: 20,
-        };
-        req.validate();
-        assert_eq!(req.page, 1);
+    fn test_new_clamps_page_zero_to_one() {
+        let req = PageRequest::new(0, 20);
+        assert_eq!(req.page(), 1);
     }
 
     #[test]
-    fn test_validate_clamps_per_page_above_100() {
-        let mut req = PageRequest {
-            page: 1,
-            per_page: 200,
-        };
-        req.validate();
-        assert_eq!(req.per_page, 100);
+    fn test_new_clamps_per_page_above_100() {
+        let req = PageRequest::new(1, 200);
+        assert_eq!(req.per_page(), 100);
     }
 
     #[test]
-    fn test_validate_clamps_per_page_zero_to_one() {
-        let mut req = PageRequest {
-            page: 1,
-            per_page: 0,
-        };
-        req.validate();
-        assert_eq!(req.per_page, 1);
+    fn test_new_clamps_per_page_zero_to_one() {
+        let req = PageRequest::new(1, 0);
+        assert_eq!(req.per_page(), 1);
     }
 
     #[test]
     fn test_offset_first_page() {
-        let req = PageRequest {
-            page: 1,
-            per_page: 20,
-        };
+        let req = PageRequest::new(1, 20);
         assert_eq!(req.offset(), 0);
     }
 
     #[test]
     fn test_offset_second_page() {
-        let req = PageRequest {
-            page: 2,
-            per_page: 20,
-        };
+        let req = PageRequest::new(2, 20);
         assert_eq!(req.offset(), 20);
     }
 
     #[test]
     fn test_offset_large_page() {
-        let req = PageRequest {
-            page: 100,
-            per_page: 50,
-        };
+        let req = PageRequest::new(100, 50);
         assert_eq!(req.offset(), 4950);
     }
 
