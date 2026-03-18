@@ -1,5 +1,7 @@
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::LazyLock;
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -21,11 +23,13 @@ use crate::domain::ports::services::webhook_sender::{EmbedField, WebhookSender};
 use crate::domain::value_objects::pagination::{PageRequest, PageResponse};
 use crate::errors::api::ApiError;
 
+#[cfg(test)]
 static VRC_ID_RE: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
     regex_lite::Regex::new(r"^usr_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
         .expect("valid regex")
 });
 
+#[cfg(test)]
 static X_ID_RE: LazyLock<regex_lite::Regex> =
     LazyLock::new(|| regex_lite::Regex::new(r"^[a-zA-Z0-9_]{1,15}$").expect("valid regex"));
 
@@ -43,12 +47,17 @@ struct OwnProfile {
     updated_at: chrono::DateTime<Utc>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, vrc_macros::Validate)]
 struct ProfileUpdateRequest {
+    #[validate(min_length = 1, max_length = 50)]
     nickname: Option<String>,
+    #[validate(regex = r"^usr_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")]
     vrc_id: Option<String>,
+    #[validate(regex = r"^[a-zA-Z0-9_]{1,15}$")]
     x_id: Option<String>,
+    #[validate(max_length = 2000)]
     bio_markdown: Option<String>,
+    #[validate(max_length = 500, https_url)]
     avatar_url: Option<String>,
     is_public: bool,
 }
@@ -229,52 +238,8 @@ async fn update_my_profile(
     auth: AuthenticatedUser<Member>,
     Json(body): Json<ProfileUpdateRequest>,
 ) -> Result<Json<OwnProfile>, ApiError> {
-    // Validate fields
-    let mut errors: HashMap<String, String> = HashMap::new();
-
-    if let Some(ref nickname) = body.nickname
-        && (nickname.is_empty() || nickname.len() > 50)
-    {
-        errors.insert(
-            "nickname".to_owned(),
-            "1〜50文字で入力してください".to_owned(),
-        );
-    }
-
-    if let Some(ref vrc_id) = body.vrc_id
-        && !VRC_ID_RE.is_match(vrc_id)
-    {
-        errors.insert(
-            "vrc_id".to_owned(),
-            "VRC IDの形式が正しくありません".to_owned(),
-        );
-    }
-
-    if let Some(ref x_id) = body.x_id
-        && !X_ID_RE.is_match(x_id)
-    {
-        errors.insert("x_id".to_owned(), "X IDの形式が正しくありません".to_owned());
-    }
-
-    if let Some(ref bio) = body.bio_markdown
-        && bio.len() > 2000
-    {
-        errors.insert(
-            "bio_markdown".to_owned(),
-            "2000文字以内で入力してください".to_owned(),
-        );
-    }
-
-    if let Some(ref url) = body.avatar_url
-        && (url.len() > 500 || !url.starts_with("https://"))
-    {
-        errors.insert(
-            "avatar_url".to_owned(),
-            "有効なHTTPS URLを入力してください".to_owned(),
-        );
-    }
-
-    if !errors.is_empty() {
+    // Validate fields via derive macro
+    if let Err(errors) = body.validate() {
         return Err(ApiError::ProfileValidation(errors));
     }
 
