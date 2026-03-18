@@ -235,10 +235,13 @@ async fn upsert_event(
     let event_id = row.id;
 
     // Delete existing tag mappings for this event
-    sqlx::query!("DELETE FROM event_tag_mappings WHERE event_id = $1", event_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    sqlx::query!(
+        "DELETE FROM event_tag_mappings WHERE event_id = $1",
+        event_id
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     // Upsert tags and create mappings
     if let Some(ref tags) = body.tags {

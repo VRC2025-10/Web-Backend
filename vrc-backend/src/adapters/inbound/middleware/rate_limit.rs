@@ -135,8 +135,26 @@ fn extract_key(req: &Request<Body>, strategy: &KeyExtractor) -> String {
     match strategy {
         KeyExtractor::PerIp => extract_ip(req),
         KeyExtractor::PerUserOrIp => {
-            // Try to find user_id from a custom extension (set by auth extractor)
-            // Falling back to IP-based keying
+            // Try to extract user_id from session cookie via SHA-256 hash fingerprint.
+            // This provides per-user keying for authenticated requests without
+            // performing a full DB lookup — we use the cookie value hash as a stable key.
+            if let Some(cookie_header) = req.headers().get("cookie") {
+                if let Ok(value) = cookie_header.to_str() {
+                    for pair in value.split(';') {
+                        let trimmed = pair.trim();
+                        if let Some(token) = trimmed.strip_prefix("session_id=") {
+                            if !token.is_empty() {
+                                use sha2::{Digest, Sha256};
+                                let mut hasher = Sha256::new();
+                                hasher.update(token.as_bytes());
+                                let hash = hasher.finalize();
+                                return format!("user:{}", hex::encode(&hash[..8]));
+                            }
+                        }
+                    }
+                }
+            }
+            // Fall back to IP-based keying for unauthenticated requests
             extract_ip(req)
         }
         KeyExtractor::Global => "global".to_owned(),
@@ -190,16 +208,17 @@ where
                         "details": null,
                     });
 
-                    let mut response = Response::new(Body::from(serde_json::to_string(&body).unwrap_or_default()));
+                    let mut response =
+                        Response::new(Body::from(serde_json::to_string(&body).unwrap_or_default()));
                     *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;
                     response.headers_mut().insert(
                         "retry-after",
-                        HeaderValue::from_str(&wait_secs.to_string()).unwrap_or_else(|_| HeaderValue::from_static("5")),
+                        HeaderValue::from_str(&wait_secs.to_string())
+                            .unwrap_or_else(|_| HeaderValue::from_static("5")),
                     );
-                    response.headers_mut().insert(
-                        "content-type",
-                        HeaderValue::from_static("application/json"),
-                    );
+                    response
+                        .headers_mut()
+                        .insert("content-type", HeaderValue::from_static("application/json"));
 
                     Ok(response)
                 }

@@ -89,14 +89,12 @@ where
                         "details": null,
                     });
 
-                    let mut response = Response::new(Body::from(
-                        serde_json::to_string(&body).unwrap_or_default(),
-                    ));
+                    let mut response =
+                        Response::new(Body::from(serde_json::to_string(&body).unwrap_or_default()));
                     *response.status_mut() = StatusCode::FORBIDDEN;
-                    response.headers_mut().insert(
-                        "content-type",
-                        HeaderValue::from_static("application/json"),
-                    );
+                    response
+                        .headers_mut()
+                        .insert("content-type", HeaderValue::from_static("application/json"));
                     Ok(response)
                 }
             }

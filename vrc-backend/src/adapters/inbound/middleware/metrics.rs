@@ -32,11 +32,7 @@ fn normalize_path(path: &str) -> String {
     path.split('/')
         .map(|segment| {
             // Detect UUID format (with or without hyphens)
-            if segment.len() >= 32
-                && segment
-                    .chars()
-                    .all(|c| c.is_ascii_hexdigit() || c == '-')
-            {
+            if segment.len() >= 32 && segment.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
                 ":id"
             } else if segment.parse::<i64>().is_ok() && !segment.is_empty() {
                 ":id"

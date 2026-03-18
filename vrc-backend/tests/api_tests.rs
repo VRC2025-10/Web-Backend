@@ -26,10 +26,8 @@ use vrc_backend::config::AppConfig;
 /// Create a fresh pool for each test. Each test run uses unique discord IDs
 /// so no TRUNCATE is needed between tests.
 async fn setup_pool() -> PgPool {
-    let database_url =
-        std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-            "postgres://vrc:vrc_dev_password@localhost:5432/vrc_backend".into()
-        });
+    let database_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://vrc:vrc_dev_password@localhost:5432/vrc_backend".into());
 
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(5)
@@ -143,11 +141,7 @@ async fn test_health_returns_ok() {
     let app = build_app(pool);
 
     let response = app
-        .oneshot(
-            Request::get("/health")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::get("/health").body(Body::empty()).unwrap())
         .await
         .unwrap();
 
@@ -262,7 +256,12 @@ async fn test_update_profile_success() {
     let resp = parse_json(response).await;
     assert_eq!(status, StatusCode::OK, "Profile update failed: {resp}");
     assert_eq!(resp["nickname"], "テストユーザー");
-    assert!(resp["bio_html"].as_str().unwrap().contains("<h1>Hello</h1>"));
+    assert!(
+        resp["bio_html"]
+            .as_str()
+            .unwrap()
+            .contains("<h1>Hello</h1>")
+    );
     assert_eq!(resp["is_public"], true);
 }
 
@@ -354,11 +353,7 @@ async fn test_metrics_endpoint() {
     let app = build_app(pool);
 
     let response = app
-        .oneshot(
-            Request::get("/metrics")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
         .await
         .unwrap();
 
@@ -371,20 +366,13 @@ async fn test_security_headers_present() {
     let app = build_app(pool);
 
     let response = app
-        .oneshot(
-            Request::get("/health")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::get("/health").body(Body::empty()).unwrap())
         .await
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
     let headers = response.headers();
-    assert_eq!(
-        headers.get("x-content-type-options").unwrap(),
-        "nosniff"
-    );
+    assert_eq!(headers.get("x-content-type-options").unwrap(), "nosniff");
     assert_eq!(headers.get("x-frame-options").unwrap(), "DENY");
     assert_eq!(
         headers.get("referrer-policy").unwrap(),

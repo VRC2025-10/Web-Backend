@@ -498,10 +498,7 @@ async fn create_club(
     let mut errors: HashMap<String, String> = HashMap::new();
 
     if body.name.is_empty() || body.name.len() > 100 {
-        errors.insert(
-            "name".to_owned(),
-            "1〜100文字で入力してください".to_owned(),
-        );
+        errors.insert("name".to_owned(), "1〜100文字で入力してください".to_owned());
     }
 
     if let Some(ref desc) = body.description_markdown {
@@ -750,15 +747,13 @@ mod tests {
 
     #[test]
     fn test_admin_cannot_grant_super_admin() {
-        let result =
-            validate_role_change(UserRole::Admin, UserRole::Member, UserRole::SuperAdmin);
+        let result = validate_role_change(UserRole::Admin, UserRole::Member, UserRole::SuperAdmin);
         assert!(matches!(result, Err(ApiError::SuperAdminRoleEscalation)));
     }
 
     #[test]
     fn test_admin_cannot_modify_super_admin() {
-        let result =
-            validate_role_change(UserRole::Admin, UserRole::SuperAdmin, UserRole::Member);
+        let result = validate_role_change(UserRole::Admin, UserRole::SuperAdmin, UserRole::Member);
         assert!(matches!(result, Err(ApiError::SuperAdminProtected)));
     }
 
@@ -859,8 +854,14 @@ mod kani_proofs {
         if validate_role_change(roles[actor_idx], roles[target_idx], new_role).is_ok() {
             let mut new_roles = roles;
             new_roles[target_idx] = new_role;
-            let new_sa_count = new_roles.iter().filter(|r| **r == UserRole::SuperAdmin).count();
-            assert!(new_sa_count >= 1, "Role change must not eliminate all super_admins");
+            let new_sa_count = new_roles
+                .iter()
+                .filter(|r| **r == UserRole::SuperAdmin)
+                .count();
+            assert!(
+                new_sa_count >= 1,
+                "Role change must not eliminate all super_admins"
+            );
         }
     }
 

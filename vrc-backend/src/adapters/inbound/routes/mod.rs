@@ -18,8 +18,7 @@ use crate::AppState;
 use crate::adapters::inbound::middleware::csrf::CsrfLayer;
 use crate::adapters::inbound::middleware::metrics::MetricsLayer;
 use crate::adapters::inbound::middleware::rate_limit::{
-    KeyExtractor, RateLimitLayer, auth_tier, build_limiter, internal_tier, public_tier,
-    system_tier,
+    KeyExtractor, RateLimitLayer, auth_tier, build_limiter, internal_tier, public_tier, system_tier,
 };
 use crate::adapters::inbound::middleware::request_id::RequestIdLayer;
 use crate::adapters::inbound::middleware::security_headers::apply_security_headers;

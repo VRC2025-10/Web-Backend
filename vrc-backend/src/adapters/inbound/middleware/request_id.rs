@@ -63,9 +63,7 @@ where
             match result {
                 Ok(mut response) => {
                     if let Ok(val) = HeaderValue::from_str(&id_for_header) {
-                        response
-                            .headers_mut()
-                            .insert("x-request-id", val);
+                        response.headers_mut().insert("x-request-id", val);
                     }
                     Ok(response)
                 }
