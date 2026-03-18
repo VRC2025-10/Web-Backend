@@ -69,18 +69,40 @@ where
             return Box::pin(async move { inner.call(req).await });
         }
 
-        // State-changing methods require Origin header matching frontend
+        // State-changing methods require Origin or Referer header matching frontend.
+        // Origin is preferred (explicitly set by browsers for cross-origin requests).
+        // Referer is used as fallback because some privacy extensions strip Origin.
         let origin = req.headers().get(header::ORIGIN).cloned();
+        let referer = req.headers().get(header::REFERER).cloned();
         let allowed = self.allowed_origin.clone();
 
         Box::pin(async move {
-            match origin {
-                Some(ref o) if o == &allowed => inner.call(req).await,
-                _ => {
+            let origin_matches = origin
+                .as_ref()
+                .map(|o| o == &allowed)
+                .unwrap_or(false);
+
+            // Fall back to Referer: extract scheme+host origin prefix and compare
+            let referer_matches = if !origin_matches {
+                referer
+                    .as_ref()
+                    .and_then(|r| r.to_str().ok())
+                    .map(|r| extract_origin_from_url(r) == allowed.to_str().unwrap_or(""))
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+
+            if origin_matches || referer_matches {
+                return inner.call(req).await;
+            }
+
+            {
                     tracing::warn!(
                         origin = ?origin,
+                        referer = ?referer,
                         expected = ?allowed,
-                        "CSRF check failed: Origin header missing or mismatched"
+                        "CSRF check failed: neither Origin nor Referer matched"
                     );
 
                     let body = json!({
@@ -99,5 +121,20 @@ where
                 }
             }
         })
+    }
+}
+
+/// Extract the origin (scheme + host + optional port) from a full URL.
+///
+/// For example, `"https://example.com/path?q=1"` → `"https://example.com"`.
+/// Returns the input unchanged if parsing fails, ensuring the comparison
+/// will safely reject rather than accidentally match.
+fn extract_origin_from_url(url: &str) -> String {
+    // Find the third slash which separates origin from path: "https://host/..."
+    let after_scheme = url.find("://").map(|i| i + 3).unwrap_or(0);
+    let path_start = url[after_scheme..].find('/').map(|i| i + after_scheme);
+    match path_start {
+        Some(i) => url[..i].to_owned(),
+        None => url.to_owned(),
     }
 }
