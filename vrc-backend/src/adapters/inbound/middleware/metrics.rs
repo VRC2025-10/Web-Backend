@@ -27,14 +27,18 @@ pub struct MetricsMiddleware<S> {
 }
 
 /// Normalize path to avoid high-cardinality label explosion.
-/// Replaces UUID-like path segments with `:id`.
+/// Replaces UUID path segments and numeric IDs with `:id`.
 fn normalize_path(path: &str) -> String {
     path.split('/')
         .map(|segment| {
-            // Detect UUID format (with or without hyphens)
-            if segment.len() >= 32 && segment.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+            // Strict UUID detection: 8-4-4-4-12 hex digits with hyphens (36 chars)
+            // or 32 hex digits without hyphens
+            if is_uuid_like(segment) {
                 ":id"
-            } else if segment.parse::<i64>().is_ok() && !segment.is_empty() {
+            } else if !segment.is_empty()
+                && segment.len() <= 20
+                && segment.chars().all(|c| c.is_ascii_digit())
+            {
                 ":id"
             } else {
                 segment
@@ -42,6 +46,25 @@ fn normalize_path(path: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("/")
+}
+
+/// Check whether a segment looks like a UUID (with or without hyphens).
+fn is_uuid_like(s: &str) -> bool {
+    match s.len() {
+        // UUID with hyphens: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+        36 => {
+            s.as_bytes().iter().enumerate().all(|(i, &b)| {
+                if i == 8 || i == 13 || i == 18 || i == 23 {
+                    b == b'-'
+                } else {
+                    b.is_ascii_hexdigit()
+                }
+            })
+        }
+        // UUID without hyphens: 32 hex digits
+        32 => s.bytes().all(|b| b.is_ascii_hexdigit()),
+        _ => false,
+    }
 }
 
 impl<S> Service<Request<Body>> for MetricsMiddleware<S>
