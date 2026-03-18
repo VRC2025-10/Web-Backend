@@ -303,3 +303,53 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/login", get(login))
         .route("/callback", get(callback))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_redirect_normal_path() {
+        assert_eq!(validate_redirect("/dashboard"), "/dashboard");
+    }
+
+    #[test]
+    fn test_validate_redirect_root() {
+        assert_eq!(validate_redirect("/"), "/");
+    }
+
+    #[test]
+    fn test_validate_redirect_nested_path() {
+        assert_eq!(validate_redirect("/profile/edit"), "/profile/edit");
+    }
+
+    #[test]
+    fn test_validate_redirect_rejects_protocol_relative() {
+        assert_eq!(validate_redirect("//evil.com"), "/");
+    }
+
+    #[test]
+    fn test_validate_redirect_rejects_absolute_url() {
+        assert_eq!(validate_redirect("https://evil.com"), "/");
+    }
+
+    #[test]
+    fn test_validate_redirect_rejects_backslash() {
+        assert_eq!(validate_redirect("/foo\\bar"), "/");
+    }
+
+    #[test]
+    fn test_validate_redirect_rejects_control_chars() {
+        assert_eq!(validate_redirect("/foo\nbar"), "/");
+    }
+
+    #[test]
+    fn test_validate_redirect_empty_string() {
+        assert_eq!(validate_redirect(""), "/");
+    }
+
+    #[test]
+    fn test_validate_redirect_just_text() {
+        assert_eq!(validate_redirect("notapath"), "/");
+    }
+}

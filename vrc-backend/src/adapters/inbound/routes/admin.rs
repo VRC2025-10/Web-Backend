@@ -732,3 +732,73 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/clubs/{id}/gallery", post(upload_gallery_image))
         .route("/gallery/{image_id}/status", patch(update_gallery_status))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_admin_can_set_member_to_staff() {
+        assert!(validate_role_change(UserRole::Admin, UserRole::Member, UserRole::Staff).is_ok());
+    }
+
+    #[test]
+    fn test_admin_cannot_grant_admin() {
+        let result = validate_role_change(UserRole::Admin, UserRole::Member, UserRole::Admin);
+        assert!(matches!(result, Err(ApiError::AdminRoleEscalation)));
+    }
+
+    #[test]
+    fn test_admin_cannot_grant_super_admin() {
+        let result =
+            validate_role_change(UserRole::Admin, UserRole::Member, UserRole::SuperAdmin);
+        assert!(matches!(result, Err(ApiError::SuperAdminRoleEscalation)));
+    }
+
+    #[test]
+    fn test_admin_cannot_modify_super_admin() {
+        let result =
+            validate_role_change(UserRole::Admin, UserRole::SuperAdmin, UserRole::Member);
+        assert!(matches!(result, Err(ApiError::SuperAdminProtected)));
+    }
+
+    #[test]
+    fn test_super_admin_can_grant_admin() {
+        assert!(
+            validate_role_change(UserRole::SuperAdmin, UserRole::Member, UserRole::Admin).is_ok()
+        );
+    }
+
+    #[test]
+    fn test_super_admin_can_grant_super_admin() {
+        assert!(
+            validate_role_change(UserRole::SuperAdmin, UserRole::Member, UserRole::SuperAdmin)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_super_admin_can_modify_super_admin() {
+        assert!(
+            validate_role_change(UserRole::SuperAdmin, UserRole::SuperAdmin, UserRole::Member)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_member_cannot_change_roles() {
+        let result = validate_role_change(UserRole::Member, UserRole::Member, UserRole::Staff);
+        assert!(matches!(result, Err(ApiError::RoleLevelInsufficient)));
+    }
+
+    #[test]
+    fn test_staff_cannot_change_roles() {
+        let result = validate_role_change(UserRole::Staff, UserRole::Member, UserRole::Staff);
+        assert!(matches!(result, Err(ApiError::RoleLevelInsufficient)));
+    }
+
+    #[test]
+    fn test_admin_can_demote_staff_to_member() {
+        assert!(validate_role_change(UserRole::Admin, UserRole::Staff, UserRole::Member).is_ok());
+    }
+}

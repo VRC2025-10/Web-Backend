@@ -60,3 +60,31 @@ pub enum UserStatus {
     Active,
     Suspended,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_role_levels_are_ordered() {
+        assert!(UserRole::Member.level() < UserRole::Staff.level());
+        assert!(UserRole::Staff.level() < UserRole::Admin.level());
+        assert!(UserRole::Admin.level() < UserRole::SuperAdmin.level());
+    }
+
+    #[test]
+    fn test_role_as_str() {
+        assert_eq!(UserRole::Member.as_str(), "member");
+        assert_eq!(UserRole::Staff.as_str(), "staff");
+        assert_eq!(UserRole::Admin.as_str(), "admin");
+        assert_eq!(UserRole::SuperAdmin.as_str(), "super_admin");
+    }
+
+    #[test]
+    fn test_role_level_values() {
+        assert_eq!(UserRole::Member.level(), 0);
+        assert_eq!(UserRole::Staff.level(), 1);
+        assert_eq!(UserRole::Admin.level(), 2);
+        assert_eq!(UserRole::SuperAdmin.level(), 3);
+    }
+}

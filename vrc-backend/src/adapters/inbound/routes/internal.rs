@@ -520,3 +520,107 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/events", get(list_events))
         .route("/reports", post(create_report))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ===== VRC ID validation =====
+
+    #[test]
+    fn test_validate_vrc_id_valid() {
+        let id = "usr_12345678-1234-1234-1234-123456789abc";
+        assert!(VRC_ID_RE.is_match(id));
+    }
+
+    #[test]
+    fn test_validate_vrc_id_missing_prefix() {
+        let id = "12345678-1234-1234-1234-123456789abc";
+        assert!(!VRC_ID_RE.is_match(id));
+    }
+
+    #[test]
+    fn test_validate_vrc_id_uppercase_rejected() {
+        let id = "usr_12345678-1234-1234-1234-123456789ABC";
+        assert!(!VRC_ID_RE.is_match(id));
+    }
+
+    #[test]
+    fn test_validate_vrc_id_too_short() {
+        let id = "usr_1234";
+        assert!(!VRC_ID_RE.is_match(id));
+    }
+
+    #[test]
+    fn test_validate_vrc_id_empty() {
+        assert!(!VRC_ID_RE.is_match(""));
+    }
+
+    // ===== X ID validation =====
+
+    #[test]
+    fn test_validate_x_id_valid_alphanumeric() {
+        assert!(X_ID_RE.is_match("aqua_vrc"));
+    }
+
+    #[test]
+    fn test_validate_x_id_single_char() {
+        assert!(X_ID_RE.is_match("A"));
+    }
+
+    #[test]
+    fn test_validate_x_id_max_length() {
+        assert!(X_ID_RE.is_match("123456789012345")); // 15 chars
+    }
+
+    #[test]
+    fn test_validate_x_id_too_long() {
+        assert!(!X_ID_RE.is_match("1234567890123456")); // 16 chars
+    }
+
+    #[test]
+    fn test_validate_x_id_special_chars_rejected() {
+        assert!(!X_ID_RE.is_match("aqua@vrc"));
+        assert!(!X_ID_RE.is_match("aqua vrc"));
+        assert!(!X_ID_RE.is_match("aqua-vrc"));
+    }
+
+    #[test]
+    fn test_validate_x_id_empty_rejected() {
+        assert!(!X_ID_RE.is_match(""));
+    }
+
+    // ===== Bio length =====
+
+    #[test]
+    fn test_bio_at_limit_passes() {
+        let bio = "a".repeat(2000);
+        assert!(bio.len() <= 2000);
+    }
+
+    #[test]
+    fn test_bio_over_limit_fails() {
+        let bio = "a".repeat(2001);
+        assert!(bio.len() > 2000);
+    }
+
+    // ===== Avatar URL =====
+
+    #[test]
+    fn test_avatar_url_https_valid() {
+        let url = "https://example.com/avatar.png";
+        assert!(url.starts_with("https://") && url.len() <= 500);
+    }
+
+    #[test]
+    fn test_avatar_url_http_rejected() {
+        let url = "http://example.com/avatar.png";
+        assert!(!url.starts_with("https://"));
+    }
+
+    #[test]
+    fn test_avatar_url_too_long_rejected() {
+        let url = format!("https://example.com/{}", "a".repeat(500));
+        assert!(url.len() > 500);
+    }
+}

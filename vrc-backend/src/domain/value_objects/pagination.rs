@@ -63,3 +63,95 @@ impl<T: Serialize> PageResponse<T> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_clamps_page_zero_to_one() {
+        let mut req = PageRequest {
+            page: 0,
+            per_page: 20,
+        };
+        req.validate();
+        assert_eq!(req.page, 1);
+    }
+
+    #[test]
+    fn test_validate_clamps_per_page_above_100() {
+        let mut req = PageRequest {
+            page: 1,
+            per_page: 200,
+        };
+        req.validate();
+        assert_eq!(req.per_page, 100);
+    }
+
+    #[test]
+    fn test_validate_clamps_per_page_zero_to_one() {
+        let mut req = PageRequest {
+            page: 1,
+            per_page: 0,
+        };
+        req.validate();
+        assert_eq!(req.per_page, 1);
+    }
+
+    #[test]
+    fn test_offset_first_page() {
+        let req = PageRequest {
+            page: 1,
+            per_page: 20,
+        };
+        assert_eq!(req.offset(), 0);
+    }
+
+    #[test]
+    fn test_offset_second_page() {
+        let req = PageRequest {
+            page: 2,
+            per_page: 20,
+        };
+        assert_eq!(req.offset(), 20);
+    }
+
+    #[test]
+    fn test_offset_large_page() {
+        let req = PageRequest {
+            page: 100,
+            per_page: 50,
+        };
+        assert_eq!(req.offset(), 4950);
+    }
+
+    #[test]
+    fn test_total_pages_exact_division() {
+        let resp: PageResponse<String> = PageResponse::new(vec![], 100, 20);
+        assert_eq!(resp.total_pages, 5);
+    }
+
+    #[test]
+    fn test_total_pages_with_remainder() {
+        let resp: PageResponse<String> = PageResponse::new(vec![], 101, 20);
+        assert_eq!(resp.total_pages, 6);
+    }
+
+    #[test]
+    fn test_total_pages_zero_items() {
+        let resp: PageResponse<String> = PageResponse::new(vec![], 0, 20);
+        assert_eq!(resp.total_pages, 0);
+    }
+
+    #[test]
+    fn test_total_pages_per_page_zero_returns_zero() {
+        let resp: PageResponse<String> = PageResponse::new(vec![], 100, 0);
+        assert_eq!(resp.total_pages, 0);
+    }
+
+    #[test]
+    fn test_total_pages_single_item() {
+        let resp: PageResponse<String> = PageResponse::new(vec![], 1, 20);
+        assert_eq!(resp.total_pages, 1);
+    }
+}
