@@ -15,7 +15,7 @@ use tower::{Layer, Service};
 pub enum KeyExtractor {
     /// Extract IP from X-Forwarded-For (rightmost) or peer address.
     PerIp,
-    /// Extract session user_id if available, otherwise fall back to `PerIp`.
+    /// Extract session `user_id` if available, otherwise fall back to `PerIp`.
     PerUserOrIp,
     /// Single bucket for all requests.
     Global,
@@ -110,14 +110,13 @@ pub struct RateLimitMiddleware<S> {
 /// (the one added by the trusted proxy closest to us).
 fn extract_ip(req: &Request<Body>) -> String {
     // Try X-Forwarded-For (rightmost entry)
-    if let Some(xff) = req.headers().get("x-forwarded-for") {
-        if let Ok(value) = xff.to_str() {
-            if let Some(last) = value.rsplit(',').next() {
-                let trimmed = last.trim();
-                if !trimmed.is_empty() {
-                    return trimmed.to_owned();
-                }
-            }
+    if let Some(xff) = req.headers().get("x-forwarded-for")
+        && let Ok(value) = xff.to_str()
+        && let Some(last) = value.rsplit(',').next()
+    {
+        let trimmed = last.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_owned();
         }
     }
 
@@ -138,19 +137,19 @@ fn extract_key(req: &Request<Body>, strategy: &KeyExtractor) -> String {
             // Try to extract user_id from session cookie via SHA-256 hash fingerprint.
             // This provides per-user keying for authenticated requests without
             // performing a full DB lookup — we use the cookie value hash as a stable key.
-            if let Some(cookie_header) = req.headers().get("cookie") {
-                if let Ok(value) = cookie_header.to_str() {
-                    for pair in value.split(';') {
-                        let trimmed = pair.trim();
-                        if let Some(token) = trimmed.strip_prefix("session_id=") {
-                            if !token.is_empty() {
-                                use sha2::{Digest, Sha256};
-                                let mut hasher = Sha256::new();
-                                hasher.update(token.as_bytes());
-                                let hash = hasher.finalize();
-                                return format!("user:{}", hex::encode(&hash[..8]));
-                            }
-                        }
+            if let Some(cookie_header) = req.headers().get("cookie")
+                && let Ok(value) = cookie_header.to_str()
+            {
+                for pair in value.split(';') {
+                    let trimmed = pair.trim();
+                    if let Some(token) = trimmed.strip_prefix("session_id=")
+                        && !token.is_empty()
+                    {
+                        use sha2::{Digest, Sha256};
+                        let mut hasher = Sha256::new();
+                        hasher.update(token.as_bytes());
+                        let hash = hasher.finalize();
+                        return format!("user:{}", hex::encode(&hash[..8]));
                     }
                 }
             }
@@ -186,7 +185,7 @@ where
 
         Box::pin(async move {
             match limiter.check_key(&key) {
-                Ok(_) => inner.call(req).await,
+                Ok(()) => inner.call(req).await,
                 Err(not_until) => {
                     let wait_secs = not_until
                         .wait_time_from(governor::clock::DefaultClock::default().now())

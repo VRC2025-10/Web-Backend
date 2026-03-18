@@ -269,9 +269,9 @@ async fn list_users(
 
 /// Validate role change authorization rules per spec:
 /// - Only admin+ can change roles (ERR-ROLE-004)
-/// - Cannot modify super_admin unless you are super_admin (ERR-ROLE-003)
-/// - Only super_admin can grant admin (ERR-ROLE-001)
-/// - Only super_admin can grant super_admin (ERR-ROLE-002)
+/// - Cannot modify `super_admin` unless you are `super_admin` (ERR-ROLE-003)
+/// - Only `super_admin` can grant admin (ERR-ROLE-001)
+/// - Only `super_admin` can grant `super_admin` (ERR-ROLE-002)
 fn validate_role_change(
     actor_role: UserRole,
     target_role: UserRole,
@@ -392,18 +392,17 @@ async fn change_user_status(
     .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     // If suspending, invalidate all sessions for the user
-    if body.status == UserStatus::Suspended {
-        if let Err(e) = sqlx::query!("DELETE FROM sessions WHERE user_id = $1", user_id)
+    if body.status == UserStatus::Suspended
+        && let Err(e) = sqlx::query!("DELETE FROM sessions WHERE user_id = $1", user_id)
             .execute(&state.db_pool)
             .await
-        {
-            tracing::error!(
-                error = %e,
-                user_id = %user_id,
-                "Failed to invalidate sessions during user suspension"
-            );
-            return Err(ApiError::Internal("Failed to invalidate sessions".to_owned()));
-        }
+    {
+        tracing::error!(
+            error = %e,
+            user_id = %user_id,
+            "Failed to invalidate sessions during user suspension"
+        );
+        return Err(ApiError::Internal("Failed to invalidate sessions".to_owned()));
     }
 
     tracing::info!(

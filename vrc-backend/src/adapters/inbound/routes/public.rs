@@ -219,10 +219,8 @@ fn truncate_bio(md: &str) -> String {
                     chars.next();
                 }
             }
-            // Bold/italic markers
-            '*' | '_' => {}
-            // Inline code
-            '`' => {}
+            // Bold/italic markers and inline code backtick
+            '*' | '_' | '`' => {}
             // Links: [text](url) → keep text
             '[' => {
                 let mut depth = 1;

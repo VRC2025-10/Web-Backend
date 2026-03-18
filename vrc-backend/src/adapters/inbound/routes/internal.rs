@@ -392,6 +392,7 @@ async fn list_events(
     Ok(Json(PageResponse::new(items, count, query.page.per_page())))
 }
 
+#[allow(clippy::too_many_lines)] // Multi-step report with target validation
 async fn create_report(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedUser<Member>,
@@ -501,7 +502,7 @@ async fn create_report(
             .send_embed(
                 "🚨 New Report Submitted",
                 &format!("Report `{}` requires staff review.", report.id),
-                0xFEE75C, // Discord yellow
+                0x00FE_E75C, // Discord yellow
                 fields,
             )
             .await

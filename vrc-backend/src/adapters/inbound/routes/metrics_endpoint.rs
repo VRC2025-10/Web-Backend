@@ -26,13 +26,12 @@ async fn metrics_handler(
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|token| {
+        .is_some_and(|token| {
             token
                 .as_bytes()
                 .ct_eq(state.config.system_api_token.as_bytes())
                 .into()
-        })
-        .unwrap_or(false);
+        });
 
     if !authorized {
         return (
@@ -47,7 +46,7 @@ async fn metrics_handler(
 
     let body = crate::METRICS_HANDLE
         .get()
-        .map(|h| h.render())
+        .map(metrics_exporter_prometheus::PrometheusHandle::render)
         .unwrap_or_default();
 
     (

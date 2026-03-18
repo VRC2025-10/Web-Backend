@@ -79,16 +79,16 @@ where
         Box::pin(async move {
             let origin_matches = origin
                 .as_ref()
-                .is_some_and(|o| o == &allowed);
+                .is_some_and(|o| *o == allowed);
 
             // Fall back to Referer: extract scheme+host origin prefix and compare
-            let referer_matches = if !origin_matches {
+            let referer_matches = if origin_matches {
+                false
+            } else {
                 referer
                     .as_ref()
                     .and_then(|r| r.to_str().ok())
                     .is_some_and(|r| extract_origin_from_url(r) == allowed.to_str().unwrap_or(""))
-            } else {
-                false
             };
 
             if origin_matches || referer_matches {
@@ -126,7 +126,7 @@ where
 /// will safely reject rather than accidentally match.
 fn extract_origin_from_url(url: &str) -> String {
     // Find the third slash which separates origin from path: "https://host/..."
-    let after_scheme = url.find("://").map(|i| i + 3).unwrap_or(0);
+    let after_scheme = url.find("://").map_or(0, |i| i + 3);
     let path_start = url[after_scheme..].find('/').map(|i| i + after_scheme);
     match path_start {
         Some(i) => url[..i].to_owned(),

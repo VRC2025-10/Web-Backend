@@ -97,6 +97,7 @@ struct MemberLeaveResponse {
 
 // ===== Handlers =====
 
+#[allow(clippy::too_many_lines)] // Multi-step upsert with tag management and webhook
 async fn upsert_event(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -301,7 +302,7 @@ async fn upsert_event(
                 .send_embed(
                     &format!("🎉 New Event: {}", body.title),
                     &desc_preview,
-                    0x5865F2, // Discord blurple
+                    0x0058_65F2, // Discord blurple
                     fields,
                 )
                 .await
@@ -323,15 +324,16 @@ async fn upsert_event(
             } else {
                 None
             },
-            updated_at: if !row.is_insert {
-                Some(row.updated_at)
-            } else {
+            updated_at: if row.is_insert {
                 None
+            } else {
+                Some(row.updated_at)
             },
         }),
     ))
 }
 
+#[allow(clippy::too_many_lines)] // Atomic 4-step suspension transaction
 async fn handle_member_leave(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -365,10 +367,9 @@ async fn handle_member_leave(
     .await
     .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    let user = match user {
-        Some(u) => u,
-        // User not found in system — this is not an error per spec
-        None => return Ok((StatusCode::NO_CONTENT, Json(None))),
+    // User not found in system — this is not an error per spec
+    let Some(user) = user else {
+        return Ok((StatusCode::NO_CONTENT, Json(None)));
     };
 
     let previous_status = user.status;
@@ -455,7 +456,7 @@ async fn handle_member_leave(
             .send_embed(
                 "👋 Member Left Server",
                 &format!("User `{user_id}` has been suspended after leaving the Discord server."),
-                0xED4245, // Discord red
+                0x00ED_4245, // Discord red
                 fields,
             )
             .await
@@ -471,8 +472,8 @@ async fn handle_member_leave(
             discord_id: body.discord_id,
             previous_status,
             new_status: UserStatus::Suspended,
-            sessions_invalidated: sessions_deleted as i64,
-            clubs_removed: clubs_removed as i64,
+            sessions_invalidated: sessions_deleted.cast_signed(),
+            clubs_removed: clubs_removed.cast_signed(),
             profile_set_private: profile_updated > 0,
         })),
     ))

@@ -31,13 +31,12 @@ pub struct MetricsMiddleware<S> {
 fn normalize_path(path: &str) -> String {
     path.split('/')
         .map(|segment| {
-            // Strict UUID detection: 8-4-4-4-12 hex digits with hyphens (36 chars)
-            // or 32 hex digits without hyphens
-            if is_uuid_like(segment) {
-                ":id"
-            } else if !segment.is_empty()
-                && segment.len() <= 20
-                && segment.chars().all(|c| c.is_ascii_digit())
+            // Replace UUID-like segments or pure-numeric IDs with :id
+            // to avoid high-cardinality label explosion in Prometheus
+            if is_uuid_like(segment)
+                || (!segment.is_empty()
+                    && segment.len() <= 20
+                    && segment.chars().all(|c| c.is_ascii_digit()))
             {
                 ":id"
             } else {

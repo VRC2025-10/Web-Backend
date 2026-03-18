@@ -5,7 +5,7 @@ use serde_json::json;
 /// Discord webhook implementation using Discord's Execute Webhook API.
 ///
 /// Sends rich embed messages to a configured Discord channel webhook URL.
-/// See: https://discord.com/developers/docs/resources/webhook#execute-webhook
+/// See: <https://discord.com/developers/docs/resources/webhook#execute-webhook>
 pub struct DiscordWebhookSender {
     http: reqwest::Client,
     webhook_url: String,
