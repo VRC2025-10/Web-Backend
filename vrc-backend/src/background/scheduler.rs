@@ -1,6 +1,6 @@
 use sqlx::PgPool;
 use std::time::Duration;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 /// Maximum backoff duration between retries on transient database errors.
 const MAX_BACKOFF: Duration = Duration::from_secs(300);
