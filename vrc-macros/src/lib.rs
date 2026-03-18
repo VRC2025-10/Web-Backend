@@ -360,10 +360,10 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Return `true` if `ty` is `Option<_>`.
 fn is_option_type(ty: &syn::Type) -> bool {
-    if let syn::Type::Path(type_path) = ty {
-        if let Some(seg) = type_path.path.segments.last() {
-            return seg.ident == "Option";
-        }
+    if let syn::Type::Path(type_path) = ty
+        && let Some(seg) = type_path.path.segments.last()
+    {
+        return seg.ident == "Option";
     }
     false
 }
