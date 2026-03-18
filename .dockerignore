@@ -1,0 +1,30 @@
+# Build artifacts
+target/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# Documentation (not needed in image)
+docs/
+specs/
+
+# Test artifacts
+vrc-backend/tests/
+
+# Docker-related files
+Dockerfile
+docker-compose*.yml
+Caddyfile
+
+# CI
+.github/
+
+# Secrets
+secrets/
+.env
+.env.*
