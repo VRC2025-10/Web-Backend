@@ -40,8 +40,8 @@ struct OwnProfile {
     nickname: Option<String>,
     vrc_id: Option<String>,
     x_id: Option<String>,
-    bio_markdown: String,
-    bio_html: String,
+    bio_markdown: Option<String>,
+    bio_html: Option<String>,
     avatar_url: Option<String>,
     is_public: bool,
     updated_at: chrono::DateTime<Utc>,
@@ -127,6 +127,15 @@ struct EventSummary {
     location: Option<String>,
     tags: Vec<String>,
     created_at: chrono::DateTime<Utc>,
+}
+
+// ===== Helpers =====
+
+/// Convert an empty string to `None` for API responses.
+/// The database stores empty strings as NOT NULL DEFAULT '', but the API spec
+/// represents absent values as null.
+fn none_if_empty(s: String) -> Option<String> {
+    if s.is_empty() { None } else { Some(s) }
 }
 
 // ===== Handlers =====
@@ -228,8 +237,8 @@ async fn get_my_profile(
         nickname: profile.nickname,
         vrc_id: profile.vrc_id,
         x_id: profile.x_id,
-        bio_markdown: profile.bio_markdown,
-        bio_html: profile.bio_html,
+        bio_markdown: none_if_empty(profile.bio_markdown),
+        bio_html: none_if_empty(profile.bio_html),
         avatar_url: profile.avatar_url,
         is_public: profile.is_public,
         updated_at: profile.updated_at,
@@ -305,8 +314,8 @@ async fn update_my_profile(
         nickname: profile.nickname,
         vrc_id: profile.vrc_id,
         x_id: profile.x_id,
-        bio_markdown: profile.bio_markdown,
-        bio_html: profile.bio_html,
+        bio_markdown: none_if_empty(profile.bio_markdown),
+        bio_html: none_if_empty(profile.bio_html),
         avatar_url: profile.avatar_url,
         is_public: profile.is_public,
         updated_at: profile.updated_at,
