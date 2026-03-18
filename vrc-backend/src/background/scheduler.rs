@@ -9,12 +9,16 @@ const MAX_BACKOFF: Duration = Duration::from_secs(300);
 const INITIAL_BACKOFF: Duration = Duration::from_secs(5);
 
 /// Spawn background tasks that run on a periodic schedule.
-pub fn spawn(pool: PgPool, session_cleanup_interval_secs: u64) {
+pub fn spawn(
+    pool: PgPool,
+    session_cleanup_interval_secs: u64,
+    event_archival_interval_secs: u64,
+) {
     tokio::spawn(session_cleanup_loop(
         pool.clone(),
         session_cleanup_interval_secs,
     ));
-    tokio::spawn(event_archival_loop(pool));
+    tokio::spawn(event_archival_loop(pool, event_archival_interval_secs));
 }
 
 /// Delete expired sessions on the configured interval.
@@ -60,9 +64,10 @@ async fn session_cleanup_loop(pool: PgPool, interval_secs: u64) {
 /// Events without `end_time` (open-ended) are archived 60 days after `start_time`
 /// to prevent indefinite accumulation in the active event list.
 ///
-/// Runs once per hour with exponential backoff on failures.
-async fn event_archival_loop(pool: PgPool) {
-    let mut interval = tokio::time::interval(Duration::from_secs(60 * 60));
+/// Interval is configurable via `EVENT_ARCHIVAL_INTERVAL_SECS` (default: 3600).
+/// Uses exponential backoff on failures.
+async fn event_archival_loop(pool: PgPool, interval_secs: u64) {
+    let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
     let mut backoff = INITIAL_BACKOFF;
     interval.tick().await;
 

@@ -24,6 +24,7 @@ pub struct AppConfig {
     pub system_api_token: String,
     pub session_max_age_secs: i64,
     pub session_cleanup_interval_secs: u64,
+    pub event_archival_interval_secs: u64,
 
     // Optional
     pub super_admin_discord_id: Option<String>,
@@ -59,6 +60,10 @@ impl AppConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(604_800), // 7 days
             session_cleanup_interval_secs: env::var("SESSION_CLEANUP_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3600),
+            event_archival_interval_secs: env::var("EVENT_ARCHIVAL_INTERVAL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3600),

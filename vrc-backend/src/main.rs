@@ -75,7 +75,11 @@ async fn main() {
     });
 
     // Start background tasks
-    scheduler::spawn(db_pool.clone(), state.config.session_cleanup_interval_secs);
+    scheduler::spawn(
+        db_pool.clone(),
+        state.config.session_cleanup_interval_secs,
+        state.config.event_archival_interval_secs,
+    );
 
     let app = routes::build_router(state.clone());
 
