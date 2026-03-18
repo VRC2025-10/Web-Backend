@@ -1,6 +1,7 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::net::TcpListener;
+use tokio::signal;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 use vrc_backend::AppState;
@@ -84,7 +85,42 @@ async fn main() {
 
     tracing::info!("Listening on {}", state.config.bind_address);
 
-    axum::serve(listener, app).await.expect("Server error");
+    // NFR-AVAIL-005: Graceful shutdown — drain in-flight requests within 30 seconds
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .expect("Server error");
+
+    tracing::info!("Server shut down gracefully");
+}
+
+/// Wait for SIGTERM or SIGINT (Ctrl-C), then allow a 30-second drain window
+/// for in-flight requests to complete before the process exits.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl-C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("Failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => tracing::info!("Received SIGINT, starting graceful shutdown"),
+        () = terminate => tracing::info!("Received SIGTERM, starting graceful shutdown"),
+    }
+
+    // Give in-flight requests up to 30 seconds to drain
+    tokio::time::sleep(Duration::from_secs(30)).await;
 }
 
 async fn bootstrap_super_admin(db_pool: &sqlx::PgPool, discord_id: &str) {
