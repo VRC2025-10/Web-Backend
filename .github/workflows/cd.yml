@@ -1,0 +1,483 @@
+# =============================================================================
+#  CD Pipeline — VRC Backend
+#  ─────────────────────────────────────────────────────────────────────────────
+#  Deployment pipeline with environment progression, health verification,
+#  automatic rollback, database migration safety, and audit trail.
+#
+#  Flow: Pre-flight → DB Backup → Deploy → Verify → Notify
+#  Rollback: Automatic on health check failure
+# =============================================================================
+name: "CD"
+run-name: "Deploy ${{ inputs.image-tag }} → ${{ inputs.environment }}"
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "Target deployment environment"
+        required: true
+        type: string
+      image-tag:
+        description: "Docker image tag to deploy"
+        required: true
+        type: string
+      sha:
+        description: "Git commit SHA for traceability"
+        required: true
+        type: string
+      skip-backup:
+        description: "Skip pre-deploy database backup"
+        required: false
+        type: boolean
+        default: false
+      dry-run:
+        description: "Dry run (verify image and skip deployment)"
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      DEPLOY_HOST:
+        required: true
+      DEPLOY_USER:
+        required: true
+      DEPLOY_SSH_KEY:
+        required: true
+      DISCORD_DEPLOY_WEBHOOK:
+        required: true
+      REGISTRY_TOKEN:
+        required: false
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target deployment environment"
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      image-tag:
+        description: "Docker image tag to deploy (e.g. sha-abcd1234)"
+        required: true
+        type: string
+      skip-backup:
+        description: "Skip pre-deploy database backup"
+        required: false
+        type: boolean
+        default: false
+      dry-run:
+        description: "Dry run (pull image but don't deploy)"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: "deploy-${{ inputs.environment }}"
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  COMPOSE_FILE: docker-compose.prod.yml
+  DEPLOY_PATH: /opt/vrc-backend
+  HEALTH_PORT: "3000"
+  HEALTH_PATH: /health
+
+jobs:
+  # ===========================================================================
+  # Pre-Flight Checks
+  # ===========================================================================
+
+  preflight:
+    name: "🔍 Pre-Flight Checks"
+    runs-on: arc-runner-set
+    timeout-minutes: 10
+    outputs:
+      image_exists: ${{ steps.check-image.outputs.exists }}
+      current_image: ${{ steps.current-state.outputs.current_image }}
+      deploy_start: ${{ steps.timestamp.outputs.start }}
+    steps:
+      - name: Record deployment start
+        id: timestamp
+        run: |
+          echo "start=$(date +%s)" >> "$GITHUB_OUTPUT"
+          echo "start_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify image exists in registry
+        id: check-image
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image-tag }}"
+          echo "Checking for image: ${IMAGE}"
+
+          if docker manifest inspect "${IMAGE}" > /dev/null 2>&1; then
+            echo "✓ Image found: ${IMAGE}"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Image not found: ${IMAGE}"
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+        env:
+          DOCKER_CLI_EXPERIMENTAL: enabled
+
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+
+      - name: Add known hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Capture current deployment state
+        id: current-state
+        run: |
+          CURRENT=$(ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "cd ${{ env.DEPLOY_PATH }} && \
+             CONTAINER_ID=\$(docker compose -f ${{ env.COMPOSE_FILE }} ps -q app 2>/dev/null | head -n 1) && \
+             if [ -n \"\$CONTAINER_ID\" ]; then \
+               docker inspect --format '{{.Config.Image}}' \"\$CONTAINER_ID\"; \
+             else \
+               echo none; \
+             fi" || echo "none")
+          echo "current_image=${CURRENT}" >> "$GITHUB_OUTPUT"
+          echo "Current deployed image: ${CURRENT}"
+
+      - name: Verify remote host connectivity
+        run: |
+          ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "echo '✓ SSH connection OK' && \
+             docker --version && \
+             docker compose version && \
+             test -d ${{ env.DEPLOY_PATH }} && echo '✓ Deploy path exists'"
+
+      - name: Deployment plan summary
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" << EOF
+          ## Deployment Plan
+
+          | Parameter | Value |
+          |-----------|-------|
+          | **Environment** | \`${{ inputs.environment }}\` |
+          | **Image Tag** | \`${{ inputs.image-tag }}\` |
+          | **Current Image** | \`${{ steps.current-state.outputs.current_image }}\` |
+          | **Commit** | \`${{ inputs.sha || github.sha }}\` |
+          | **Actor** | \`${{ github.actor }}\` |
+          | **Dry Run** | \`${{ inputs.dry-run || false }}\` |
+          | **Skip Backup** | \`${{ inputs.skip-backup || false }}\` |
+          EOF
+
+  # ===========================================================================
+  # Database Backup (pre-deploy safety net)
+  # ===========================================================================
+
+  backup:
+    name: "💾 Database Backup"
+    needs: [preflight]
+    if: inputs.skip-backup != true && inputs.dry-run != true
+    runs-on: arc-runner-set
+    timeout-minutes: 15
+    environment:
+      name: ${{ inputs.environment }}
+    steps:
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+
+      - name: Add known hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Create pre-deploy backup
+        run: |
+          BACKUP_FILE="backup-$(date +%Y%m%d-%H%M%S)-pre-deploy-${{ inputs.image-tag }}.sql.gz"
+          echo "Creating backup: ${BACKUP_FILE}"
+
+          ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" bash << 'REMOTE_SCRIPT'
+            set -euo pipefail
+            cd ${{ env.DEPLOY_PATH }}
+            mkdir -p /opt/backups
+
+            BACKUP_FILE="backup-$(date +%Y%m%d-%H%M%S)-pre-deploy.sql.gz"
+
+            docker compose -f ${{ env.COMPOSE_FILE }} exec -T db \
+              pg_dump -U vrc_app -d vrc_class_reunion \
+              --no-owner --no-privileges --format=custom \
+              | gzip > "/opt/backups/${BACKUP_FILE}"
+
+            BACKUP_SIZE=$(stat -c %s "/opt/backups/${BACKUP_FILE}" 2>/dev/null || echo "0")
+            echo "✓ Backup created: ${BACKUP_FILE} (${BACKUP_SIZE} bytes)"
+
+            # Retain last 10 backups, remove older ones
+            ls -t /opt/backups/backup-*.sql.gz 2>/dev/null | tail -n +11 | xargs -r rm -f
+            echo "✓ Old backups pruned (keeping last 10)"
+          REMOTE_SCRIPT
+
+  # ===========================================================================
+  # Deploy
+  # ===========================================================================
+
+  deploy:
+    name: "🚀 Deploy to ${{ inputs.environment }}"
+    needs: [preflight, backup]
+    if: |
+      always() &&
+      needs.preflight.result == 'success' &&
+      (needs.backup.result == 'success' || needs.backup.result == 'skipped') &&
+      inputs.dry-run != true
+    runs-on: arc-runner-set
+    timeout-minutes: 20
+    environment:
+      name: ${{ inputs.environment }}
+      url: "https://${{ secrets.DEPLOY_HOST }}"
+    outputs:
+      healthy: ${{ steps.health.outputs.healthy }}
+    steps:
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+
+      - name: Add known hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Pull new image
+        run: |
+          TARGET_IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}:${{ inputs.image-tag }}"
+          echo "::group::Pull Image"
+          if [[ -n "${{ secrets.REGISTRY_TOKEN }}" ]]; then
+            ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+              "printf '%s' '${{ secrets.REGISTRY_TOKEN }}' | docker login ghcr.io -u '${{ github.repository_owner }}' --password-stdin >/dev/null"
+          fi
+          ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "cd ${{ env.DEPLOY_PATH }} && \
+             VRC_BACKEND_IMAGE='${TARGET_IMAGE}' docker compose -f ${{ env.COMPOSE_FILE }} pull app"
+          echo "::endgroup::"
+
+      - name: Deploy new version
+        run: |
+          TARGET_IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}:${{ inputs.image-tag }}"
+          echo "::group::Deploy"
+          ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "cd ${{ env.DEPLOY_PATH }} && \
+             VRC_BACKEND_IMAGE='${TARGET_IMAGE}' docker compose -f ${{ env.COMPOSE_FILE }} up -d --force-recreate app --remove-orphans"
+          echo "::endgroup::"
+
+      - name: Wait for startup
+        run: sleep 10
+
+      - name: Health verification (progressive)
+        id: health
+        run: |
+          MAX_RETRIES=15
+          RETRY_WAIT=4
+          HEALTHY="false"
+
+          for i in $(seq 1 "${MAX_RETRIES}"); do
+            echo "Health check attempt ${i}/${MAX_RETRIES}..."
+
+            RESPONSE=$(ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+              "curl -sf -w '\n%{http_code}' http://localhost:${{ env.HEALTH_PORT }}${{ env.HEALTH_PATH }}" 2>/dev/null || echo -e "\n000")
+
+            HTTP_CODE=$(echo "${RESPONSE}" | tail -1)
+            BODY=$(echo "${RESPONSE}" | head -n -1)
+
+            echo "HTTP ${HTTP_CODE}: ${BODY}"
+
+            if [[ "${HTTP_CODE}" == "200" ]]; then
+              HEALTHY="true"
+              echo "✓ Health check passed"
+              break
+            fi
+
+            if (( i < MAX_RETRIES )); then
+              sleep "${RETRY_WAIT}"
+            fi
+          done
+
+          echo "healthy=${HEALTHY}" >> "$GITHUB_OUTPUT"
+
+          if [[ "${HEALTHY}" != "true" ]]; then
+            echo "::error::Health check failed after ${MAX_RETRIES} attempts"
+
+            echo "::group::Application Logs (last 100 lines)"
+            ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+              "cd ${{ env.DEPLOY_PATH }} && \
+               docker compose -f ${{ env.COMPOSE_FILE }} logs app --tail 100 --no-color" || true
+            echo "::endgroup::"
+
+            echo "::group::Container Status"
+            ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+              "cd ${{ env.DEPLOY_PATH }} && \
+               docker compose -f ${{ env.COMPOSE_FILE }} ps" || true
+            echo "::endgroup::"
+
+            exit 1
+          fi
+
+  # ===========================================================================
+  # Automatic Rollback (on deploy failure)
+  # ===========================================================================
+
+  rollback:
+    name: "⏪ Automatic Rollback"
+    needs: [preflight, deploy]
+    if: failure() && needs.preflight.outputs.current_image != 'none'
+    runs-on: arc-runner-set
+    timeout-minutes: 15
+    steps:
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+
+      - name: Add known hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Rollback to previous version
+        run: |
+          echo "::warning::Rolling back deployment to: ${{ needs.preflight.outputs.current_image }}"
+
+          ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" bash << 'REMOTE_SCRIPT'
+            set -euo pipefail
+            cd ${{ env.DEPLOY_PATH }}
+
+            echo "Starting previous version..."
+            VRC_BACKEND_IMAGE='${{ needs.preflight.outputs.current_image }}' \
+              docker compose -f ${{ env.COMPOSE_FILE }} up -d --force-recreate app
+
+            sleep 10
+
+            echo "Verifying rollback health..."
+            HTTP_CODE=$(curl -sf -o /dev/null -w '%{http_code}' \
+              "http://localhost:${{ env.HEALTH_PORT }}${{ env.HEALTH_PATH }}" || echo "000")
+
+            if [[ "${HTTP_CODE}" == "200" ]]; then
+              echo "✓ Rollback successful (HTTP ${HTTP_CODE})"
+            else
+              echo "✗ Rollback health check failed (HTTP ${HTTP_CODE})"
+              echo "CRITICAL: Manual intervention required"
+              docker compose -f ${{ env.COMPOSE_FILE }} logs app --tail 50
+              exit 1
+            fi
+          REMOTE_SCRIPT
+
+  # ===========================================================================
+  # Post-Deploy Smoke Tests
+  # ===========================================================================
+
+  smoke-test:
+    name: "🔥 Smoke Tests"
+    needs: [deploy]
+    if: success()
+    runs-on: arc-runner-set
+    timeout-minutes: 10
+    steps:
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+
+      - name: Add known hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: API endpoint smoke tests
+        run: |
+          ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" bash <<'REMOTE_SCRIPT'
+            set -euo pipefail
+            BASE_URL="http://localhost:${{ env.HEALTH_PORT }}"
+            TARGET_IMAGE="ghcr.io/${{ github.repository }}:${{ inputs.image-tag }}"
+            TARGET_IMAGE="${TARGET_IMAGE,,}"
+            FAILED=0
+
+            CONTAINER_ID=$(cd ${{ env.DEPLOY_PATH }} && docker compose -f ${{ env.COMPOSE_FILE }} ps -q app | head -n 1)
+            if [[ -z "${CONTAINER_ID}" ]]; then
+              echo "✗ App container is not running"
+              exit 1
+            fi
+            CURRENT_IMAGE=$(docker inspect --format '{{.Config.Image}}' "${CONTAINER_ID}")
+
+            check_endpoint() {
+              local path=$1
+              local expected_code=$2
+              local description=$3
+
+              HTTP_CODE=$(curl -sf -o /dev/null -w '%{http_code}' "${BASE_URL}${path}" || echo "000")
+
+              if [[ "${HTTP_CODE}" == "${expected_code}" ]]; then
+                echo "✓ ${description} — HTTP ${HTTP_CODE}"
+              else
+                echo "✗ ${description} — Expected ${expected_code}, got ${HTTP_CODE}"
+                FAILED=$((FAILED + 1))
+              fi
+            }
+
+            echo "Running smoke tests against ${BASE_URL}..."
+            echo ""
+
+            if [[ "${CURRENT_IMAGE}" == "${TARGET_IMAGE}" ]]; then
+              echo "✓ Deployed image matches target (${CURRENT_IMAGE})"
+            else
+              echo "✗ Deployed image mismatch — expected ${TARGET_IMAGE}, got ${CURRENT_IMAGE}"
+              FAILED=$((FAILED + 1))
+            fi
+
+            check_endpoint "/health" "200" "Health endpoint"
+
+            echo ""
+            if (( FAILED > 0 )); then
+              echo "::error::${FAILED} smoke test(s) failed"
+              exit 1
+            else
+              echo "✓ All smoke tests passed"
+            fi
+          REMOTE_SCRIPT
+
+      - name: Check container resource usage
+        run: |
+          echo "::group::Container Stats"
+          ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}' \
+             \$(docker compose -f ${{ env.DEPLOY_PATH }}/${{ env.COMPOSE_FILE }} ps -q)" || true
+          echo "::endgroup::"
+
+  # ===========================================================================
+  # Notification
+  # ===========================================================================
+
+  notify:
+    name: "📢 Deploy Notification"
+    needs: [preflight, deploy, rollback, smoke-test]
+    if: always()
+    uses: ./.github/workflows/reusable-notify.yml
+    with:
+      status: ${{ needs.deploy.result == 'success' && 'success' || needs.rollback.result == 'success' && 'warning' || 'failure' }}
+      title: "Deployment — ${{ inputs.environment }}"
+      environment: ${{ inputs.environment }}
+      deploy-status: ${{ needs.deploy.result == 'success' && 'Deployed successfully' || needs.rollback.result == 'success' && 'Rolled back' || 'Failed' }}
+      image-tag: ${{ inputs.image-tag }}
+      additional-message: |
+        Previous: `${{ needs.preflight.outputs.current_image }}`
+        New: `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image-tag }}`
+    secrets:
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_DEPLOY_WEBHOOK }}
+    permissions: {}
