@@ -1,7 +1,7 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::domain::entities::report::{Report, ReportStatus, ReportTargetType};
+use crate::domain::entities::report::{Report, ReportTargetType};
 use crate::domain::ports::repositories::report_repository::ReportRepository;
 use crate::errors::infrastructure::InfraError;
 
@@ -20,22 +20,20 @@ impl ReportRepository for PgReportRepository {
         &self,
         reporter_user_id: Uuid,
         target_type: ReportTargetType,
-        target_id: Uuid,
+        target_id: &str,
         reason: &str,
     ) -> Result<Report, InfraError> {
-        let row = sqlx::query_as!(
-            Report,
+        let row = sqlx::query_as::<_, Report>(
             r#"
             INSERT INTO reports (reporter_user_id, target_type, target_id, reason)
             VALUES ($1, $2, $3, $4)
-            RETURNING id, reporter_user_id, target_type as "target_type: ReportTargetType",
-                      target_id, reason, status as "status: ReportStatus", created_at
+            RETURNING id, reporter_user_id, target_type, target_id, reason, status, created_at
             "#,
-            reporter_user_id,
-            target_type as ReportTargetType,
-            target_id,
-            reason
         )
+        .bind(reporter_user_id)
+        .bind(target_type)
+        .bind(target_id)
+        .bind(reason)
         .fetch_one(&self.pool)
         .await?;
         Ok(row)
@@ -45,19 +43,19 @@ impl ReportRepository for PgReportRepository {
         &self,
         reporter_user_id: Uuid,
         target_type: ReportTargetType,
-        target_id: Uuid,
+        target_id: &str,
     ) -> Result<bool, InfraError> {
-        let exists = sqlx::query_scalar!(
+        let exists = sqlx::query_scalar::<_, bool>(
             r#"
             SELECT EXISTS(
                 SELECT 1 FROM reports
                 WHERE reporter_user_id = $1 AND target_type = $2 AND target_id = $3
-            ) as "exists!: bool"
+            )
             "#,
-            reporter_user_id,
-            target_type as ReportTargetType,
-            target_id,
         )
+        .bind(reporter_user_id)
+        .bind(target_type)
+        .bind(target_id)
         .fetch_one(&self.pool)
         .await?;
         Ok(exists)
