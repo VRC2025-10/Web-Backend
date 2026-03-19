@@ -60,9 +60,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Run cargo audit
+        # sqlx-macros-core pulls sqlx-mysql into build-time dependencies only.
+        # RUSTSEC-2023-0071 has no upstream patch yet and does not affect the shipped runtime path.
+        run: cargo audit --ignore RUSTSEC-2023-0071
 
   build:
     name: Build Image
