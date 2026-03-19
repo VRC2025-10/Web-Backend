@@ -1,0 +1,163 @@
+# =============================================================================
+#  Reusable Workflow: Rust Check & Test
+#  Called by ci.yml for lint, compile, and test phases.
+#  Supports multiple toolchain versions and test scopes.
+# =============================================================================
+name: "Reusable — Rust Check"
+
+on:
+  workflow_call:
+    inputs:
+      runner-label:
+        description: "Runner label for job execution"
+        required: false
+        type: string
+        default: "arc-runner-set"
+      toolchain:
+        description: "Rust toolchain (stable, nightly, 1.85.0)"
+        required: false
+        type: string
+        default: "stable"
+      components:
+        description: "Rust components to install"
+        required: false
+        type: string
+        default: ""
+      check-fmt:
+        description: "Run cargo fmt check"
+        required: false
+        type: boolean
+        default: false
+      check-clippy:
+        description: "Run cargo clippy"
+        required: false
+        type: boolean
+        default: false
+      clippy-args:
+        description: "Extra arguments for clippy"
+        required: false
+        type: string
+        default: "--all-targets --all-features -- -D warnings"
+      run-tests:
+        description: "Run cargo test"
+        required: false
+        type: boolean
+        default: false
+      test-args:
+        description: "Extra arguments for cargo test"
+        required: false
+        type: string
+        default: "--workspace"
+      test-threads:
+        description: "Number of test threads"
+        required: false
+        type: string
+        default: ""
+      needs-database:
+        description: "Whether tests require PostgreSQL"
+        required: false
+        type: boolean
+        default: false
+      run-doc-check:
+        description: "Run cargo doc check"
+        required: false
+        type: boolean
+        default: false
+      sqlx-offline:
+        description: "Use SQLx offline mode"
+        required: false
+        type: string
+        default: "true"
+      timeout:
+        description: "Job timeout in minutes"
+        required: false
+        type: number
+        default: 30
+      upload-artifact:
+        description: "Artifact name to upload (empty = skip)"
+        required: false
+        type: string
+        default: ""
+    outputs:
+      outcome:
+        description: "Job outcome (success, failure, cancelled)"
+        value: ${{ jobs.rust-check.outputs.outcome }}
+
+permissions:
+  contents: read
+
+jobs:
+  rust-check:
+    name: "Rust Check (${{ inputs.toolchain }})"
+    runs-on: ${{ inputs.runner-label }}
+    timeout-minutes: ${{ inputs.timeout }}
+    outputs:
+      outcome: ${{ steps.result.outputs.outcome }}
+    env:
+      SQLX_OFFLINE: ${{ inputs.sqlx-offline }}
+    steps:
+      # ── Checkout ─────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # ── Toolchain ────────────────────────────────────────────────────────
+      - name: Setup Rust toolchain
+        uses: ./.github/actions/setup-rust-toolchain
+        with:
+          toolchain: ${{ inputs.toolchain }}
+          components: ${{ inputs.components }}
+          cache-prefix: "v1-rust-check"
+
+      # ── Database (conditional) ───────────────────────────────────────────
+      - name: Setup PostgreSQL
+        if: inputs.needs-database
+        uses: ./.github/actions/setup-postgres
+        with:
+          migrations-path: "vrc-backend/migrations"
+
+      # ── Format check ─────────────────────────────────────────────────────
+      - name: cargo fmt --check
+        if: inputs.check-fmt
+        run: cargo fmt --all -- --check
+
+      # ── Clippy ───────────────────────────────────────────────────────────
+      - name: cargo clippy
+        if: inputs.check-clippy
+        run: cargo clippy ${{ inputs.clippy-args }}
+
+      # ── Tests ────────────────────────────────────────────────────────────
+      - name: cargo test
+        if: inputs.run-tests
+        run: |
+          TEST_CMD="cargo test ${{ inputs.test-args }}"
+          if [[ -n "${{ inputs.test-threads }}" ]]; then
+            TEST_CMD="${TEST_CMD} -- --test-threads=${{ inputs.test-threads }}"
+          fi
+          eval "${TEST_CMD}"
+        env:
+          RUST_BACKTRACE: "1"
+
+      # ── Doc check ────────────────────────────────────────────────────────
+      - name: cargo doc
+        if: inputs.run-doc-check
+        run: cargo doc --workspace --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+      # ── Upload artifact ──────────────────────────────────────────────────
+      - name: Upload artifact
+        if: inputs.upload-artifact != '' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.upload-artifact }}
+          path: target/
+          retention-days: 1
+          if-no-files-found: ignore
+
+      # ── Record outcome ───────────────────────────────────────────────────
+      - name: Record outcome
+        id: result
+        if: always()
+        run: echo "outcome=${{ job.status }}" >> "$GITHUB_OUTPUT"
