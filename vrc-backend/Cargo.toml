@@ -7,10 +7,10 @@ edition = "2024"
 # Web framework
 axum = { version = "0.8", features = ["macros"] }
 axum-extra = { version = "0.10", features = ["cookie"] }
-tower = { version = "0.5", features = ["full"] }
+tower = { version = "0.5", features = ["util", "timeout"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "timeout", "catch-panic", "request-id", "set-header"] }
-tokio = { version = "1", features = ["full"] }
-hyper = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "time", "macros"] }
+hyper = { version = "1", features = ["server", "http1", "http2"] }
 
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "migrate"] }
@@ -46,6 +46,9 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener"] }
 
+# Secrets
+secrecy = "0.10"
+
 # Rate limiting
 governor = "0.8"
 
@@ -54,6 +57,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 dotenvy = "0.15"
 ulid = "1"
+itoa = "1"
 
 # Proc macros (workspace member)
 vrc-macros = { path = "../vrc-macros" }
@@ -61,6 +65,7 @@ vrc-macros = { path = "../vrc-macros" }
 [dev-dependencies]
 tokio-test = "0.4"
 proptest = "1"
+serde_urlencoded = "0.7"
 
 [lints.clippy]
 all = "warn"
