@@ -1,8 +1,6 @@
 services:
   app:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: "${VRC_BACKEND_IMAGE:-vrc-backend:latest}"
     container_name: vrc-backend
     restart: unless-stopped
     ports:
