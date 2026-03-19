@@ -37,13 +37,13 @@ on:
         default: false
     secrets:
       DEPLOY_HOST:
-        required: true
+        required: false
       DEPLOY_USER:
-        required: true
+        required: false
       DEPLOY_SSH_KEY:
-        required: true
+        required: false
       DISCORD_DEPLOY_WEBHOOK:
-        required: true
+        required: false
       REGISTRY_TOKEN:
         required: false
   workflow_dispatch:
@@ -92,9 +92,11 @@ jobs:
   # ===========================================================================
 
   preflight:
-    name: "🔍 Pre-Flight Checks"
+    name: "Pre-Flight Checks"
     runs-on: arc-runner-set
     timeout-minutes: 10
+    environment:
+      name: ${{ inputs.environment }}
     outputs:
       image_exists: ${{ steps.check-image.outputs.exists }}
       current_image: ${{ steps.current-state.outputs.current_image }}
@@ -128,7 +130,7 @@ jobs:
           echo "Checking for image: ${IMAGE}"
 
           if docker manifest inspect "${IMAGE}" > /dev/null 2>&1; then
-            echo "✓ Image found: ${IMAGE}"
+            echo "Image found: ${IMAGE}"
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "::error::Image not found: ${IMAGE}"
@@ -165,10 +167,10 @@ jobs:
       - name: Verify remote host connectivity
         run: |
           ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
-            "echo '✓ SSH connection OK' && \
+            "echo 'SSH connection OK' && \
              docker --version && \
              docker compose version && \
-             test -d ${{ env.DEPLOY_PATH }} && echo '✓ Deploy path exists'"
+             test -d ${{ env.DEPLOY_PATH }} && echo 'Deploy path exists'"
 
       - name: Deployment plan summary
         run: |
@@ -191,7 +193,7 @@ jobs:
   # ===========================================================================
 
   backup:
-    name: "💾 Database Backup"
+    name: "Database Backup"
     needs: [preflight]
     if: inputs.skip-backup != true && inputs.dry-run != true
     runs-on: arc-runner-set
@@ -227,11 +229,11 @@ jobs:
               | gzip > "/opt/backups/${BACKUP_FILE}"
 
             BACKUP_SIZE=$(stat -c %s "/opt/backups/${BACKUP_FILE}" 2>/dev/null || echo "0")
-            echo "✓ Backup created: ${BACKUP_FILE} (${BACKUP_SIZE} bytes)"
+            echo "Backup created: ${BACKUP_FILE} (${BACKUP_SIZE} bytes)"
 
             # Retain last 10 backups, remove older ones
             ls -t /opt/backups/backup-*.sql.gz 2>/dev/null | tail -n +11 | xargs -r rm -f
-            echo "✓ Old backups pruned (keeping last 10)"
+            echo "Old backups pruned (keeping last 10)"
           REMOTE_SCRIPT
 
   # ===========================================================================
@@ -239,7 +241,7 @@ jobs:
   # ===========================================================================
 
   deploy:
-    name: "🚀 Deploy to ${{ inputs.environment }}"
+    name: "Deploy to ${{ inputs.environment }}"
     needs: [preflight, backup]
     if: |
       always() &&
@@ -308,7 +310,7 @@ jobs:
 
             if [[ "${HTTP_CODE}" == "200" ]]; then
               HEALTHY="true"
-              echo "✓ Health check passed"
+              echo "Health check passed"
               break
             fi
 
@@ -342,11 +344,13 @@ jobs:
   # ===========================================================================
 
   rollback:
-    name: "⏪ Automatic Rollback"
+    name: "Automatic Rollback"
     needs: [preflight, deploy]
     if: failure() && needs.preflight.outputs.current_image != 'none'
     runs-on: arc-runner-set
     timeout-minutes: 15
+    environment:
+      name: ${{ inputs.environment }}
     steps:
       - name: Setup SSH
         uses: webfactory/ssh-agent@v0.9.0
@@ -377,9 +381,9 @@ jobs:
               "http://localhost:${{ env.HEALTH_PORT }}${{ env.HEALTH_PATH }}" || echo "000")
 
             if [[ "${HTTP_CODE}" == "200" ]]; then
-              echo "✓ Rollback successful (HTTP ${HTTP_CODE})"
+              echo "Rollback successful (HTTP ${HTTP_CODE})"
             else
-              echo "✗ Rollback health check failed (HTTP ${HTTP_CODE})"
+              echo "Rollback health check failed (HTTP ${HTTP_CODE})"
               echo "CRITICAL: Manual intervention required"
               docker compose -f ${{ env.COMPOSE_FILE }} logs app --tail 50
               exit 1
@@ -391,11 +395,13 @@ jobs:
   # ===========================================================================
 
   smoke-test:
-    name: "🔥 Smoke Tests"
+    name: "Smoke Tests"
     needs: [deploy]
     if: success()
     runs-on: arc-runner-set
     timeout-minutes: 10
+    environment:
+      name: ${{ inputs.environment }}
     steps:
       - name: Setup SSH
         uses: webfactory/ssh-agent@v0.9.0
@@ -418,7 +424,7 @@ jobs:
 
             CONTAINER_ID=$(cd ${{ env.DEPLOY_PATH }} && docker compose -f ${{ env.COMPOSE_FILE }} ps -q app | head -n 1)
             if [[ -z "${CONTAINER_ID}" ]]; then
-              echo "✗ App container is not running"
+              echo "App container is not running"
               exit 1
             fi
             CURRENT_IMAGE=$(docker inspect --format '{{.Config.Image}}' "${CONTAINER_ID}")
@@ -431,9 +437,9 @@ jobs:
               HTTP_CODE=$(curl -sf -o /dev/null -w '%{http_code}' "${BASE_URL}${path}" || echo "000")
 
               if [[ "${HTTP_CODE}" == "${expected_code}" ]]; then
-                echo "✓ ${description} — HTTP ${HTTP_CODE}"
+                echo "${description} - HTTP ${HTTP_CODE}"
               else
-                echo "✗ ${description} — Expected ${expected_code}, got ${HTTP_CODE}"
+                echo "${description} - expected ${expected_code}, got ${HTTP_CODE}"
                 FAILED=$((FAILED + 1))
               fi
             }
@@ -442,9 +448,9 @@ jobs:
             echo ""
 
             if [[ "${CURRENT_IMAGE}" == "${TARGET_IMAGE}" ]]; then
-              echo "✓ Deployed image matches target (${CURRENT_IMAGE})"
+              echo "Deployed image matches target (${CURRENT_IMAGE})"
             else
-              echo "✗ Deployed image mismatch — expected ${TARGET_IMAGE}, got ${CURRENT_IMAGE}"
+              echo "Deployed image mismatch - expected ${TARGET_IMAGE}, got ${CURRENT_IMAGE}"
               FAILED=$((FAILED + 1))
             fi
 
@@ -455,7 +461,7 @@ jobs:
               echo "::error::${FAILED} smoke test(s) failed"
               exit 1
             else
-              echo "✓ All smoke tests passed"
+              echo "All smoke tests passed"
             fi
           REMOTE_SCRIPT
 
@@ -472,7 +478,7 @@ jobs:
   # ===========================================================================
 
   notify:
-    name: "📢 Deploy Notification"
+    name: "Deploy Notification"
     needs: [preflight, deploy, rollback, smoke-test]
     if: always()
     uses: ./.github/workflows/reusable-notify.yml

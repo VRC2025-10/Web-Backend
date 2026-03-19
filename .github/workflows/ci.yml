@@ -74,7 +74,7 @@ jobs:
   # ===========================================================================
 
   changes:
-    name: "△ Detect Changes"
+    name: "Detect Changes"
     runs-on: arc-runner-set
     timeout-minutes: 5
     outputs:
@@ -123,7 +123,7 @@ jobs:
           fi
 
   metadata:
-    name: "ℹ Pipeline Metadata"
+    name: "Pipeline Metadata"
     runs-on: arc-runner-set
     timeout-minutes: 5
     outputs:
@@ -140,6 +140,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          token: ${{ github.token }}
           fetch-depth: 0
 
       - name: Extract metadata
@@ -198,7 +199,7 @@ jobs:
   # ===========================================================================
 
   check-lockfile:
-    name: "🔒 Lockfile Integrity"
+    name: "Lockfile Integrity"
     needs: [changes]
     if: needs.changes.outputs.any_src == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: arc-runner-set
@@ -221,7 +222,7 @@ jobs:
           }
 
   format:
-    name: "📐 Format Check"
+    name: "Format Check"
     needs: [changes]
     if: needs.changes.outputs.any_src == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: arc-runner-set
@@ -241,7 +242,7 @@ jobs:
         run: cargo fmt --all -- --check
 
   typos:
-    name: "🔤 Typo Check"
+    name: "Typo Check"
     needs: [changes]
     if: needs.changes.outputs.any_src == 'true'
     runs-on: arc-runner-set
@@ -261,7 +262,7 @@ jobs:
   # ===========================================================================
 
   clippy-stable:
-    name: "📎 Clippy (stable)"
+    name: "Clippy (stable)"
     needs: [changes, check-lockfile, format]
     if: |
       always() &&
@@ -295,7 +296,7 @@ jobs:
                -A clippy::missing_panics_doc
 
   clippy-nightly:
-    name: "📎 Clippy (nightly)"
+    name: "Clippy (nightly)"
     needs: [changes, check-lockfile]
     if: |
       always() &&
@@ -331,7 +332,7 @@ jobs:
                -A clippy::missing_panics_doc
 
   check-sqlx-offline:
-    name: "🗄️ SQLx Offline Metadata"
+    name: "SQLx Offline Metadata"
     needs: [changes]
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.migrations == 'true'
     runs-on: arc-runner-set
@@ -357,7 +358,7 @@ jobs:
           SQLX_OFFLINE: "false"
 
   doc-check:
-    name: "📖 Documentation"
+    name: "Documentation"
     needs: [changes, check-lockfile]
     if: |
       always() &&
@@ -381,7 +382,7 @@ jobs:
           RUSTDOCFLAGS: "-D warnings"
 
   check-msrv:
-    name: "📌 MSRV Check"
+    name: "MSRV Check"
     needs: [changes, metadata, check-lockfile]
     if: |
       always() &&
@@ -407,7 +408,7 @@ jobs:
   # ===========================================================================
 
   test-unit:
-    name: "🧪 Unit Tests"
+    name: "Unit Tests"
     needs: [changes, clippy-stable]
     if: |
       always() &&
@@ -436,7 +437,7 @@ jobs:
           RUST_BACKTRACE: "1"
 
   test-contract:
-    name: "📋 Contract Tests"
+    name: "Contract Tests"
     needs: [changes, clippy-stable]
     if: |
       always() &&
@@ -470,7 +471,7 @@ jobs:
           RUST_BACKTRACE: "1"
 
   test-integration:
-    name: "🔗 Integration Tests"
+    name: "Integration Tests"
     needs: [changes, clippy-stable]
     if: |
       always() &&
@@ -516,7 +517,7 @@ jobs:
           fi
 
   test-property:
-    name: "🎲 Property Tests"
+    name: "Property Tests"
     needs: [changes, metadata, clippy-stable]
     if: |
       always() &&
@@ -556,7 +557,7 @@ jobs:
           if-no-files-found: ignore
 
   coverage:
-    name: "📊 Code Coverage"
+    name: "Code Coverage"
     needs: [changes, metadata, clippy-stable]
     if: |
       always() &&
@@ -615,7 +616,7 @@ jobs:
   # ===========================================================================
 
   security-audit:
-    name: "🛡️ Cargo Audit"
+    name: "Cargo Audit"
     needs: [changes]
     if: needs.changes.outputs.any_src == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: arc-runner-set
@@ -637,7 +638,7 @@ jobs:
             --json > audit-report.json 2>&1 || true
 
           if cargo audit --deny warnings --deny unmaintained --deny yanked 2>&1; then
-            echo "✓ No known vulnerabilities"
+            echo "No known vulnerabilities"
           else
             echo "::error::Security vulnerabilities found in dependencies"
             cat audit-report.json
@@ -654,7 +655,7 @@ jobs:
           if-no-files-found: ignore
 
   security-deny:
-    name: "🚫 Cargo Deny"
+    name: "Cargo Deny"
     needs: [changes]
     if: needs.changes.outputs.any_src == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: arc-runner-set
@@ -680,7 +681,7 @@ jobs:
         run: cargo deny check sources
 
   secret-detection:
-    name: "🔑 Secret Detection"
+    name: "Secret Detection"
     needs: [changes]
     if: needs.changes.outputs.any_src == 'true'
     runs-on: arc-runner-set
@@ -689,6 +690,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          token: ${{ github.token }}
           fetch-depth: 0
 
       - name: Run gitleaks
@@ -702,7 +704,7 @@ jobs:
   # ===========================================================================
 
   build-release:
-    name: "🔨 Release Build"
+    name: "Release Build"
     needs: [changes, clippy-stable, test-unit]
     if: |
       always() &&
@@ -753,7 +755,7 @@ jobs:
           retention-days: 7
 
   build-docker:
-    name: "🐳 Docker Build"
+    name: "Docker Build"
     needs: [changes, metadata, clippy-stable, test-unit]
     if: |
       always() &&
@@ -776,7 +778,7 @@ jobs:
       attestations: write
 
   migration-verify:
-    name: "🗃️ Migration Integrity"
+    name: "Migration Integrity"
     needs: [changes]
     if: needs.changes.outputs.migrations == 'true'
     runs-on: arc-runner-set
@@ -810,7 +812,7 @@ jobs:
           sqlx migrate run --source vrc-backend/migrations
           echo "::endgroup::"
 
-          echo "✓ Migrations are idempotent"
+          echo "Migrations are idempotent"
 
       - name: Verify no pending migrations
         run: |
@@ -819,14 +821,14 @@ jobs:
             echo "::error::Found ${PENDING} pending migration(s)"
             exit 1
           fi
-          echo "✓ No pending migrations"
+          echo "No pending migrations"
 
   # ===========================================================================
   # Phase 6: CI Gate (all-or-nothing quality gate)
   # ===========================================================================
 
   ci-gate:
-    name: "✅ CI Gate"
+    name: "CI Gate"
     if: always()
     needs:
       - changes
@@ -890,11 +892,11 @@ jobs:
             RESULT="${entry##*:}"
 
             case "${RESULT}" in
-              success)   ICON="✅" ;;
-              failure)   ICON="❌"; FAILED=true ;;
-              cancelled) ICON="⚠️" ;;
-              skipped)   ICON="⏭️" ;;
-              *)         ICON="❓" ;;
+              success)   ICON="PASS" ;;
+              failure)   ICON="FAIL"; FAILED=true ;;
+              cancelled) ICON="CANCELLED" ;;
+              skipped)   ICON="SKIPPED" ;;
+              *)         ICON="UNKNOWN" ;;
             esac
 
             echo "| ${NAME} | ${ICON} ${RESULT} |" >> "$GITHUB_STEP_SUMMARY"
@@ -924,9 +926,9 @@ jobs:
           done
 
           if [[ "${GATE_PASS}" == "true" ]]; then
-            echo "### ✅ CI Gate: PASSED" >> "$GITHUB_STEP_SUMMARY"
+            echo "### CI Gate: PASSED" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "### ❌ CI Gate: FAILED" >> "$GITHUB_STEP_SUMMARY"
+            echo "### CI Gate: FAILED" >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
 
@@ -935,7 +937,7 @@ jobs:
   # ===========================================================================
 
   trigger-deploy:
-    name: "🚀 Trigger Deployment"
+    name: "Trigger Deployment"
     needs: [ci-gate, metadata, build-docker]
     if: |
       always() &&
@@ -956,7 +958,7 @@ jobs:
   # ===========================================================================
 
   notify-failure:
-    name: "📢 Notify (Failure)"
+    name: "Notify Failure"
     needs: [ci-gate]
     if: failure()
     uses: ./.github/workflows/reusable-notify.yml
@@ -973,7 +975,7 @@ jobs:
   # ===========================================================================
 
   cleanup:
-    name: "🧹 Cleanup"
+    name: "Cleanup"
     if: always()
     needs:
       - test-integration

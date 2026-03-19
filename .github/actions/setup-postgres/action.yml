@@ -110,7 +110,7 @@ runs:
           sleep 1
         done
 
-        echo "✓ PostgreSQL ready in ${SECONDS}s"
+        echo "PostgreSQL ready in ${SECONDS}s"
 
         # Verify connection with psql
         docker exec "${CONTAINER}" psql -U "${{ inputs.database-user }}" \

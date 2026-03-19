@@ -77,16 +77,8 @@ jobs:
             *)        COLOR=15105570 ;; # Orange
           esac
 
-          # Determine status emoji
-          case "${{ inputs.status }}" in
-            success)   EMOJI="✅" ;;
-            failure)   EMOJI="❌" ;;
-            cancelled) EMOJI="⚠️" ;;
-            *)         EMOJI="🔄" ;;
-          esac
-
           # Build description
-          DESC="${EMOJI} **Status:** ${{ inputs.status }}"
+          DESC="**Status:** ${{ inputs.status }}"
           DESC="${DESC}\n**Commit:** [\`${GITHUB_SHA::8}\`](${{ github.server_url }}/${{ github.repository }}/commit/${GITHUB_SHA})"
           DESC="${DESC}\n**Branch:** \`${{ github.ref_name }}\`"
           DESC="${DESC}\n**Actor:** ${{ github.actor }}"
@@ -143,10 +135,10 @@ jobs:
               "${WEBHOOK_URL}" 2>/dev/null || echo "000")
 
             if [[ "${HTTP_CODE}" =~ ^2[0-9]{2}$ ]]; then
-              echo "✓ Discord notification sent (HTTP ${HTTP_CODE})"
+              echo "Discord notification sent (HTTP ${HTTP_CODE})"
               break
             fi
 
-            echo "⚠ Discord webhook failed (HTTP ${HTTP_CODE}), attempt ${attempt}/3"
+            echo "Discord webhook failed (HTTP ${HTTP_CODE}), attempt ${attempt}/3"
             sleep $(( attempt * 2 ))
           done

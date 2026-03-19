@@ -112,10 +112,10 @@ runs:
             # Optionally verify commit SHA in response
             if [[ -n "${{ inputs.expected-sha }}" ]]; then
               if echo "${HEALTH_RESPONSE}" | grep -q "${{ inputs.expected-sha }}"; then
-                echo "✓ SHA verification passed"
+                echo "SHA verification passed"
                 HEALTHY="true"
               else
-                echo "⚠ SHA mismatch — waiting for new version to be ready"
+                echo "SHA mismatch - waiting for new version to be ready"
               fi
             else
               HEALTHY="true"
@@ -123,11 +123,11 @@ runs:
 
             if [[ "${HEALTHY}" == "true" ]]; then
               echo "::endgroup::"
-              echo "✓ Health check passed on attempt ${i}"
+              echo "Health check passed on attempt ${i}"
               break
             fi
           else
-            echo "✗ Health check failed (HTTP ${HTTP_CODE})"
+            echo "Health check failed (HTTP ${HTTP_CODE})"
           fi
 
           echo "::endgroup::"

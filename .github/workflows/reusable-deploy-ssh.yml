@@ -73,11 +73,11 @@ on:
         value: ${{ jobs.deploy.outputs.previous_image }}
     secrets:
       DEPLOY_HOST:
-        required: true
+        required: false
       DEPLOY_USER:
-        required: true
+        required: false
       DEPLOY_SSH_KEY:
-        required: true
+        required: false
       DEPLOY_SSH_KNOWN_HOSTS:
         required: false
       REGISTRY_TOKEN:
@@ -197,12 +197,12 @@ jobs:
               "curl -sf -o /dev/null -w '%{http_code}' http://localhost:${{ inputs.health-port }}${{ inputs.health-endpoint }}" 2>/dev/null || echo "000")
 
             if [[ "${HTTP_CODE}" == "200" ]]; then
-              echo "✓ Health check passed (HTTP ${HTTP_CODE})"
+              echo "Health check passed (HTTP ${HTTP_CODE})"
               HEALTHY="true"
               break
             fi
 
-            echo "✗ Health check failed (HTTP ${HTTP_CODE})"
+            echo "Health check failed (HTTP ${HTTP_CODE})"
 
             if (( i < MAX_RETRIES )); then
               sleep "${RETRY_WAIT}"
@@ -241,7 +241,7 @@ jobs:
             "curl -sf -o /dev/null -w '%{http_code}' http://localhost:${{ inputs.health-port }}${{ inputs.health-endpoint }}" || echo "000")
 
           if [[ "${ROLLBACK_HTTP}" == "200" ]]; then
-            echo "✓ Rollback succeeded"
+            echo "Rollback succeeded"
           else
             echo "::error::Rollback also failed (HTTP ${ROLLBACK_HTTP}). Manual intervention required."
           fi

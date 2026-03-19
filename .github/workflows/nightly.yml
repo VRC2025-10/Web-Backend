@@ -55,7 +55,7 @@ jobs:
   # ===========================================================================
 
   proptest-extended:
-    name: "🎲 Extended Property Tests"
+    name: "Extended Property Tests"
     runs-on: arc-runner-set
     timeout-minutes: 45
     steps:
@@ -93,7 +93,7 @@ jobs:
   # ===========================================================================
 
   integration-full:
-    name: "🔗 Full Integration Suite"
+    name: "Full Integration Suite"
     runs-on: arc-runner-set
     timeout-minutes: 30
     steps:
@@ -128,7 +128,7 @@ jobs:
   # ===========================================================================
 
   miri:
-    name: "🔮 Miri (UB Detection)"
+    name: "Miri (UB Detection)"
     if: inputs.run_miri != false
     runs-on: arc-runner-set
     timeout-minutes: 60
@@ -173,7 +173,7 @@ jobs:
   # ===========================================================================
 
   kani:
-    name: "🎯 Kani (Formal Verification)"
+    name: "Kani (Formal Verification)"
     if: inputs.run_kani != false
     runs-on: arc-runner-set
     timeout-minutes: 60
@@ -221,7 +221,7 @@ jobs:
   # ===========================================================================
 
   dependency-freshness:
-    name: "📦 Dependency Freshness"
+    name: "Dependency Freshness"
     runs-on: arc-runner-set
     timeout-minutes: 15
     steps:
@@ -266,7 +266,7 @@ jobs:
   # ===========================================================================
 
   nightly-compile:
-    name: "🌙 Nightly Compiler Check"
+    name: "Nightly Compiler Check"
     runs-on: arc-runner-set
     timeout-minutes: 20
     steps:
@@ -304,7 +304,7 @@ jobs:
   # ===========================================================================
 
   docker-rebuild:
-    name: "🐳 Docker Full Rebuild"
+    name: "Docker Full Rebuild"
     runs-on: arc-runner-set
     timeout-minutes: 45
     steps:
@@ -344,7 +344,7 @@ jobs:
   # ===========================================================================
 
   nightly-report:
-    name: "📊 Nightly Report"
+    name: "Nightly Report"
     if: always()
     needs:
       - proptest-extended
@@ -360,7 +360,7 @@ jobs:
       - name: Generate nightly report
         run: |
           cat >> "$GITHUB_STEP_SUMMARY" << EOF
-          ## 🌙 Nightly Extended Test Report
+          ## Nightly Extended Test Report
 
           | Test Suite | Result |
           |------------|--------|
@@ -392,7 +392,7 @@ jobs:
           fi
 
   notify:
-    name: "📢 Nightly Notification"
+    name: "Nightly Notification"
     needs: [nightly-report]
     if: failure()
     uses: ./.github/workflows/reusable-notify.yml
