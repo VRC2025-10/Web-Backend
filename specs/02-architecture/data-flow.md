@@ -52,7 +52,7 @@ sequenceDiagram
             BE->>DB: INSERT session (id, user_id, expires_at)
             DB-->>BE: OK
 
-            BE-->>Caddy: 302 → FRONTEND_ORIGIN<br/>Set-Cookie: session_id={uuid}; HttpOnly; SameSite=Lax<br/>Set-Cookie: oauth_state=; Max-Age=0
+            BE-->>Caddy: 302 → FRONTEND_ORIGIN<br/>Set-Cookie: session_id={uuid}, HttpOnly, SameSite=Lax<br/>Clear oauth_state cookie (Max-Age=0)
             Caddy-->>User: Redirect to frontend (logged in)
         end
     end

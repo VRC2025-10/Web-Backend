@@ -41,10 +41,10 @@ sequenceDiagram
     Backend->>Backend: Generate random session token (256-bit)
     Backend->>Backend: SHA-256 hash the token
     Backend->>DB: INSERT session (hashed_token, user_id, expires_at)
-    Backend->>Client: Set-Cookie: session=<raw_token>; HttpOnly; Secure; SameSite=Lax
+    Backend->>Client: Set-Cookie: session=[raw_token], HttpOnly, Secure, SameSite=Lax
 
     Note over Client,DB: Subsequent Requests
-    Client->>Backend: Cookie: session=<raw_token>
+    Client->>Backend: Cookie: session=[raw_token]
     Backend->>Backend: SHA-256 hash the received token
     Backend->>DB: SELECT * FROM sessions WHERE hashed_token = $1
     DB->>Backend: Session data (user_id, expires_at)

@@ -38,10 +38,10 @@ sequenceDiagram
     Backend->>Backend: ランダムセッショントークン生成(256-bit)
     Backend->>Backend: SHA-256 ハッシュ化
     Backend->>DB: INSERT session (hashed_token, user_id, expires_at)
-    Backend->>Client: Set-Cookie: session=<raw_token>; HttpOnly; Secure; SameSite=Lax
+    Backend->>Client: Set-Cookie: session=[raw_token], HttpOnly, Secure, SameSite=Lax
 
     Note over Client,DB: 後続リクエスト
-    Client->>Backend: Cookie: session=<raw_token>
+    Client->>Backend: Cookie: session=[raw_token]
     Backend->>Backend: 受信トークンを SHA-256 ハッシュ化
     Backend->>DB: SELECT * FROM sessions WHERE hashed_token = $1
     DB->>Backend: セッションデータ

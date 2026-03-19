@@ -59,7 +59,7 @@ sequenceDiagram
 
     BK->>DB: INSERT INTO sessions<br/>(user_id, token_hash, expires_at)
 
-    BK-->>C: 302 フロントエンドへリダイレクト<br/>Set-Cookie: session=<token>; HttpOnly; Secure; SameSite=Lax
+    BK-->>C: 302 フロントエンドへリダイレクト<br/>Set-Cookie: session=[token], HttpOnly, Secure, SameSite=Lax
     C-->>B: レスポンス転送
     B->>F: セッション Cookie 付きでアプリをロード
 ```
@@ -85,7 +85,7 @@ sequenceDiagram
     participant BK as Backend (Axum)
     participant DB as PostgreSQL
 
-    B->>C: PUT /api/v1/internal/profile<br/>Cookie: session=<token><br/>X-CSRF-Token: <csrf_token><br/>Body: { display_name, bio_markdown, is_public }
+    B->>C: PUT /api/v1/internal/profile<br/>Cookie: session=[token]<br/>X-CSRF-Token: [csrf_token]<br/>Body: { display_name, bio_markdown, is_public }
     C->>BK: リクエスト転送
 
     Note over BK: ミドルウェア: request_id,<br/>security_headers, metrics
