@@ -93,7 +93,6 @@ jobs:
     timeout-minutes: ${{ inputs.timeout }}
     environment:
       name: ${{ inputs.environment }}
-      url: "https://${{ secrets.DEPLOY_HOST }}"
     outputs:
       status: ${{ steps.result.outputs.status }}
       duration: ${{ steps.result.outputs.duration }}

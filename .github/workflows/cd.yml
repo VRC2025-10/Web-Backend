@@ -98,6 +98,7 @@ jobs:
     outputs:
       image_exists: ${{ steps.check-image.outputs.exists }}
       current_image: ${{ steps.current-state.outputs.current_image }}
+      target_image: ${{ steps.resolve-image.outputs.target_image }}
       deploy_start: ${{ steps.timestamp.outputs.start }}
     steps:
       - name: Record deployment start
@@ -105,6 +106,13 @@ jobs:
         run: |
           echo "start=$(date +%s)" >> "$GITHUB_OUTPUT"
           echo "start_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve target image
+        id: resolve-image
+        run: |
+          TARGET_IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}:${{ inputs.image-tag }}"
+          echo "target_image=${TARGET_IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "Target image: ${TARGET_IMAGE}"
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -242,7 +250,6 @@ jobs:
     timeout-minutes: 20
     environment:
       name: ${{ inputs.environment }}
-      url: "https://${{ secrets.DEPLOY_HOST }}"
     outputs:
       healthy: ${{ steps.health.outputs.healthy }}
     steps:
@@ -258,7 +265,7 @@ jobs:
 
       - name: Pull new image
         run: |
-          TARGET_IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}:${{ inputs.image-tag }}"
+          TARGET_IMAGE="${{ needs.preflight.outputs.target_image }}"
           echo "::group::Pull Image"
           if [[ -n "${{ secrets.REGISTRY_TOKEN }}" ]]; then
             ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
@@ -271,7 +278,7 @@ jobs:
 
       - name: Deploy new version
         run: |
-          TARGET_IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}:${{ inputs.image-tag }}"
+          TARGET_IMAGE="${{ needs.preflight.outputs.target_image }}"
           echo "::group::Deploy"
           ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
             "cd ${{ env.DEPLOY_PATH }} && \
@@ -477,7 +484,7 @@ jobs:
       image-tag: ${{ inputs.image-tag }}
       additional-message: |
         Previous: `${{ needs.preflight.outputs.current_image }}`
-        New: `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image-tag }}`
+        New: `${{ needs.preflight.outputs.target_image }}`
     secrets:
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_DEPLOY_WEBHOOK }}
     permissions: {}
