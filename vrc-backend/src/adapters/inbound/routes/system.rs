@@ -12,12 +12,15 @@ use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
 use crate::AppState;
+use crate::adapters::inbound::extractors::{ValidatedJson, ValidatedPayload};
 use crate::adapters::outbound::markdown::renderer::PulldownCmarkRenderer;
 use crate::domain::entities::event::EventStatus;
 use crate::domain::entities::user::UserStatus;
 use crate::domain::ports::services::markdown_renderer::MarkdownRenderer;
 use crate::domain::ports::services::webhook_sender::{EmbedField, WebhookSender};
 use crate::errors::api::ApiError;
+
+use secrecy::ExposeSecret;
 
 // ===== System token verification =====
 
@@ -65,6 +68,16 @@ struct EventUpsertRequest {
     tags: Option<Vec<String>>,
 }
 
+impl ValidatedPayload for EventUpsertRequest {
+    fn validate_payload(&self) -> Result<(), HashMap<String, String>> {
+        self.validate()
+    }
+
+    fn validation_error(errors: HashMap<String, String>) -> ApiError {
+        ApiError::SystemValidation(errors)
+    }
+}
+
 #[derive(Serialize)]
 struct EventUpsertResponse {
     id: Uuid,
@@ -105,16 +118,16 @@ struct MemberLeaveResponse {
 
 // ===== Handlers =====
 
+#[vrc_macros::handler(method = POST, path = "/api/v1/system/sync/events", rate_limit = "system", summary = "Upsert event from system sync")]
 #[allow(clippy::too_many_lines)] // Multi-step upsert with tag management and webhook
 async fn upsert_event(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(body): Json<EventUpsertRequest>,
+    ValidatedJson(body): ValidatedJson<EventUpsertRequest>,
 ) -> Result<(StatusCode, Json<EventUpsertResponse>), ApiError> {
-    verify_system_token(&headers, &state.config.system_api_token)?;
+    verify_system_token(&headers, state.config.system_api_token.expose_secret())?;
 
-    // Validate simple field constraints via derive macro
-    let mut errors = body.validate().err().unwrap_or_default();
+    let mut errors = HashMap::new();
 
     // Cross-field and collection validations that the macro cannot express
     if let Some(ref tags) = body.tags {
@@ -151,27 +164,21 @@ async fn upsert_event(
         renderer.render(md)
     });
 
-    // Resolve host user if discord_id provided
-    let host_user_id: Option<Uuid> = if let Some(ref discord_id) = body.host_discord_id {
-        sqlx::query_scalar!("SELECT id FROM users WHERE discord_id = $1", discord_id)
-            .fetch_optional(&state.db_pool)
-            .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?
-    } else {
-        None
-    };
-
-    let host_name = if let Some(ref discord_id) = body.host_discord_id {
-        sqlx::query_scalar!(
-            "SELECT discord_display_name FROM users WHERE discord_id = $1",
+    // Resolve host user if discord_id provided (single query instead of two)
+    let (host_user_id, host_name) = if let Some(ref discord_id) = body.host_discord_id {
+        let row = sqlx::query!(
+            "SELECT id, discord_display_name FROM users WHERE discord_id = $1",
             discord_id
         )
         .fetch_optional(&state.db_pool)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-        .unwrap_or_default()
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        match row {
+            Some(r) => (Some(r.id), r.discord_display_name),
+            None => (None, String::new()),
+        }
     } else {
-        String::new()
+        (None, String::new())
     };
 
     // Begin transaction: upsert event + manage tags
@@ -273,50 +280,50 @@ async fn upsert_event(
     if row.is_insert
         && let Some(ref webhook) = state.webhook
     {
-            let mut fields = vec![
-                EmbedField {
-                    name: "Host".to_owned(),
-                    value: if host_name.is_empty() {
-                        "TBD".to_owned()
-                    } else {
-                        host_name.clone()
-                    },
-                    inline: true,
+        let mut fields = vec![
+            EmbedField {
+                name: "Host".to_owned(),
+                value: if host_name.is_empty() {
+                    "TBD".to_owned()
+                } else {
+                    host_name.clone()
                 },
-                EmbedField {
-                    name: "Start".to_owned(),
-                    value: body.start_time.format("%Y-%m-%d %H:%M UTC").to_string(),
-                    inline: true,
-                },
-            ];
-            if let Some(ref loc) = body.location {
-                fields.push(EmbedField {
-                    name: "Location".to_owned(),
-                    value: loc.clone(),
-                    inline: true,
-                });
-            }
+                inline: true,
+            },
+            EmbedField {
+                name: "Start".to_owned(),
+                value: body.start_time.format("%Y-%m-%d %H:%M UTC").to_string(),
+                inline: true,
+            },
+        ];
+        if let Some(ref loc) = body.location {
+            fields.push(EmbedField {
+                name: "Location".to_owned(),
+                value: loc.clone(),
+                inline: true,
+            });
+        }
 
-            // Fire-and-forget: webhook failures must not break the API response
-            let desc_preview: String = body
-                .description_markdown
-                .as_deref()
-                .unwrap_or("")
-                .chars()
-                .take(200)
-                .collect();
+        // Fire-and-forget: webhook failures must not break the API response
+        let desc_preview: String = body
+            .description_markdown
+            .as_deref()
+            .unwrap_or("")
+            .chars()
+            .take(200)
+            .collect();
 
-            if let Err(e) = webhook
-                .send_embed(
-                    &format!("🎉 New Event: {}", body.title),
-                    &desc_preview,
-                    0x0058_65F2, // Discord blurple
-                    fields,
-                )
-                .await
-            {
-                tracing::error!(error = %e, event_id = %event_id, "Failed to send event webhook");
-            }
+        if let Err(e) = webhook
+            .send_embed(
+                &format!("🎉 New Event: {}", body.title),
+                &desc_preview,
+                0x0058_65F2, // Discord blurple
+                fields,
+            )
+            .await
+        {
+            tracing::error!(error = %e, event_id = %event_id, "Failed to send event webhook");
+        }
     }
 
     Ok((
@@ -341,13 +348,14 @@ async fn upsert_event(
     ))
 }
 
+#[vrc_macros::handler(method = POST, path = "/api/v1/system/sync/users/leave", rate_limit = "system", summary = "Handle member leave")]
 #[allow(clippy::too_many_lines)] // Atomic 4-step suspension transaction
 async fn handle_member_leave(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(body): Json<MemberLeaveRequest>,
 ) -> Result<(StatusCode, Json<Option<MemberLeaveResponse>>), ApiError> {
-    verify_system_token(&headers, &state.config.system_api_token)?;
+    verify_system_token(&headers, state.config.system_api_token.expose_secret())?;
 
     // Validate discord_id: must be 17-20 digit numeric string (Discord snowflake)
     if body.discord_id.is_empty()
