@@ -62,9 +62,7 @@ impl WebhookSender for DiscordWebhookSender {
                 body = %body,
                 "Discord webhook delivery failed"
             );
-            return Err(InfraError::Webhook(format!(
-                "Discord returned {status}"
-            )));
+            return Err(InfraError::Webhook(format!("Discord returned {status}")));
         }
 
         Ok(())
