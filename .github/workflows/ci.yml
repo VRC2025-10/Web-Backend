@@ -1,141 +1,997 @@
-name: CI/CD
+# =============================================================================
+#  CI Pipeline — VRC Backend
+#  ─────────────────────────────────────────────────────────────────────────────
+#  Architecture: Multi-phase DAG pipeline with conditional execution
+#  Runner:       ARC (Actions Runner Controller) self-hosted runner set
+#  Phases:       Detection → Validation → Compilation → Testing → Security
+#                → Build Verification → Gate → Deploy (main only)
+#  Jobs:         22 | Estimated: 8–15 min (cache hit) / 20–30 min (cold)
+# =============================================================================
+name: "CI"
+run-name: "${{ github.actor }} ∙ ${{ github.event_name }} ∙ ${{ github.ref_name }}"
 
 on:
   push:
-    branches: [main]
-    tags: ['v*']
+    branches: [main, develop, "release/**", "hotfix/**"]
+    paths-ignore:
+      - "docs/**"
+      - "specs/**"
+      - "*.md"
+      - ".gitignore"
+      - "LICENSE"
   pull_request:
-    branches: [main]
+    branches: [main, develop, "release/**"]
+    types: [opened, synchronize, reopened, ready_for_review]
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch:
+    inputs:
+      extended_tests:
+        description: "Run extended test suite (property tests, coverage)"
+        type: boolean
+        default: false
+      force_docker_build:
+        description: "Force Docker image build even on PR"
+        type: boolean
+        default: false
+      rust_toolchain_override:
+        description: "Override Rust toolchain (e.g. nightly-2026-03-01)"
+        type: string
+        default: ""
 
+# ── Least-privilege permissions ────────────────────────────────────────────
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+  security-events: write
+
+# ── Concurrency ────────────────────────────────────────────────────────────
+concurrency:
+  group: "ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}"
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# ── Global environment ─────────────────────────────────────────────────────
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_TIMEOUT: "60"
   SQLX_OFFLINE: "true"
+  RUST_BACKTRACE: short
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  RUST_TOOLCHAIN: ${{ inputs.rust_toolchain_override || 'stable' }}
+  MSRV: "1.85.0"
 
+# =============================================================================
+#  J O B S
+# =============================================================================
 jobs:
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
+
+  # ===========================================================================
+  # Phase 0: Change Detection & Pipeline Metadata
+  # ===========================================================================
+
+  changes:
+    name: "△ Detect Changes"
+    runs-on: arc-runner-set
+    timeout-minutes: 5
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      macros: ${{ steps.filter.outputs.macros }}
+      migrations: ${{ steps.filter.outputs.migrations }}
+      docker: ${{ steps.filter.outputs.docker }}
+      ci: ${{ steps.filter.outputs.ci }}
+      any_src: ${{ steps.aggregate.outputs.any_src }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-targets --all-features -- -D warnings
+          persist-credentials: false
 
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - "vrc-backend/src/**"
+              - "vrc-backend/Cargo.toml"
+              - "Cargo.toml"
+              - "Cargo.lock"
+            macros:
+              - "vrc-macros/src/**"
+              - "vrc-macros/Cargo.toml"
+            migrations:
+              - "vrc-backend/migrations/**"
+            docker:
+              - "Dockerfile"
+              - "docker-compose*.yml"
+              - "Caddyfile"
+            ci:
+              - ".github/**"
+
+      - name: Aggregate change flags
+        id: aggregate
+        run: |
+          if [[ "${{ steps.filter.outputs.rust }}" == "true" || \
+                "${{ steps.filter.outputs.macros }}" == "true" || \
+                "${{ steps.filter.outputs.migrations }}" == "true" || \
+                "${{ steps.filter.outputs.ci }}" == "true" ]]; then
+            echo "any_src=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "any_src=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  metadata:
+    name: "ℹ Pipeline Metadata"
+    runs-on: arc-runner-set
+    timeout-minutes: 5
+    outputs:
+      sha_short: ${{ steps.meta.outputs.sha_short }}
+      is_main: ${{ steps.meta.outputs.is_main }}
+      is_tag: ${{ steps.meta.outputs.is_tag }}
+      is_pr: ${{ steps.meta.outputs.is_pr }}
+      is_draft_pr: ${{ steps.meta.outputs.is_draft_pr }}
+      is_merge_queue: ${{ steps.meta.outputs.is_merge_queue }}
+      version: ${{ steps.meta.outputs.version }}
+      should_deploy: ${{ steps.meta.outputs.should_deploy }}
+      run_extended: ${{ steps.meta.outputs.run_extended }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Extract metadata
+        id: meta
+        run: |
+          echo "sha_short=$(git rev-parse --short=8 HEAD)" >> "$GITHUB_OUTPUT"
+          echo "is_main=${{ github.ref == 'refs/heads/main' }}" >> "$GITHUB_OUTPUT"
+          echo "is_tag=${{ startsWith(github.ref, 'refs/tags/v') }}" >> "$GITHUB_OUTPUT"
+          echo "is_pr=${{ github.event_name == 'pull_request' }}" >> "$GITHUB_OUTPUT"
+          echo "is_draft_pr=${{ github.event.pull_request.draft == true }}" >> "$GITHUB_OUTPUT"
+          echo "is_merge_queue=${{ github.event_name == 'merge_group' }}" >> "$GITHUB_OUTPUT"
+
+          # Extract version from Cargo.toml
+          VERSION=$(grep '^version' vrc-backend/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+          # Deploy if pushing to main or tagging
+          if [[ "${{ github.ref }}" == "refs/heads/main" || \
+                "${{ github.ref }}" == refs/tags/v* ]]; then
+            echo "should_deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_deploy=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Extended tests on main, tags, manual, or merge queue
+          if [[ "${{ github.ref }}" == "refs/heads/main" || \
+                "${{ github.ref }}" == refs/tags/v* || \
+                "${{ inputs.extended_tests }}" == "true" || \
+                "${{ github.event_name }}" == "merge_group" ]]; then
+            echo "run_extended=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_extended=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Pipeline decision summary
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" << EOF
+          ## Pipeline Configuration
+
+          | Parameter | Value |
+          |-----------|-------|
+          | **SHA** | \`${{ steps.meta.outputs.sha_short }}\` |
+          | **Version** | \`${{ steps.meta.outputs.version }}\` |
+          | **Main branch** | \`${{ steps.meta.outputs.is_main }}\` |
+          | **Tag release** | \`${{ steps.meta.outputs.is_tag }}\` |
+          | **Pull request** | \`${{ steps.meta.outputs.is_pr }}\` |
+          | **Draft PR** | \`${{ steps.meta.outputs.is_draft_pr }}\` |
+          | **Merge queue** | \`${{ steps.meta.outputs.is_merge_queue }}\` |
+          | **Should deploy** | \`${{ steps.meta.outputs.should_deploy }}\` |
+          | **Extended tests** | \`${{ steps.meta.outputs.run_extended }}\` |
+          | **Toolchain** | \`${{ env.RUST_TOOLCHAIN }}\` |
+          EOF
+
+  # ===========================================================================
+  # Phase 1: Quick Validation (< 2 min)
+  # ===========================================================================
+
+  check-lockfile:
+    name: "🔒 Lockfile Integrity"
+    needs: [changes]
+    if: needs.changes.outputs.any_src == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: arc-runner-set
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust-toolchain
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          cache-prefix: "v1-lockfile"
+
+      - name: Verify Cargo.lock is up-to-date
+        run: |
+          cargo check --workspace --locked 2>&1 || {
+            echo "::error::Cargo.lock is out of date. Run 'cargo check' and commit the updated lockfile."
+            exit 1
+          }
+
+  format:
+    name: "📐 Format Check"
+    needs: [changes]
+    if: needs.changes.outputs.any_src == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: arc-runner-set
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust-toolchain
+        with:
+          toolchain: "nightly"
+          components: "rustfmt"
+          cache-prefix: "v1-fmt"
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+  typos:
+    name: "🔤 Typo Check"
+    needs: [changes]
+    if: needs.changes.outputs.any_src == 'true'
+    runs-on: arc-runner-set
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check for typos
+        uses: crate-ci/typos@master
+        with:
+          config: ""
+
+  # ===========================================================================
+  # Phase 2: Compilation & Static Analysis (< 5 min)
+  # ===========================================================================
+
+  clippy-stable:
+    name: "📎 Clippy (stable)"
+    needs: [changes, check-lockfile, format]
+    if: |
+      always() &&
+      needs.changes.outputs.any_src == 'true' &&
+      (needs.check-lockfile.result == 'success' || needs.check-lockfile.result == 'skipped') &&
+      (needs.format.result == 'success' || needs.format.result == 'skipped')
+    runs-on: arc-runner-set
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust-toolchain
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: "clippy"
+          cache-prefix: "v1-clippy"
+
+      - name: cargo clippy (all targets)
+        run: |
+          cargo clippy \
+            --workspace \
+            --all-targets \
+            --all-features \
+            -- -D warnings \
+               -W clippy::pedantic \
+               -A clippy::module_name_repetitions \
+               -A clippy::must_use_candidate \
+               -A clippy::missing_errors_doc \
+               -A clippy::missing_panics_doc
+
+  clippy-nightly:
+    name: "📎 Clippy (nightly)"
+    needs: [changes, check-lockfile]
+    if: |
+      always() &&
+      needs.changes.outputs.any_src == 'true' &&
+      (needs.check-lockfile.result == 'success' || needs.check-lockfile.result == 'skipped')
+    runs-on: arc-runner-set
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust-toolchain
+        with:
+          toolchain: "nightly"
+          components: "clippy"
+          cache-prefix: "v1-clippy-nightly"
+
+      - name: cargo clippy (nightly extra lints)
+        run: |
+          cargo clippy \
+            --workspace \
+            --all-targets \
+            --all-features \
+            -- -D warnings \
+               -W clippy::nursery \
+               -W clippy::cargo \
+               -A clippy::multiple_crate_versions \
+               -A clippy::module_name_repetitions \
+               -A clippy::must_use_candidate \
+               -A clippy::missing_errors_doc \
+               -A clippy::missing_panics_doc
+
+  check-sqlx-offline:
+    name: "🗄️ SQLx Offline Metadata"
+    needs: [changes]
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.migrations == 'true'
+    runs-on: arc-runner-set
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust-toolchain
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          cache-prefix: "v1-sqlx-check"
+
+      - uses: ./.github/actions/setup-postgres
+        with:
+          migrations-path: "vrc-backend/migrations"
+
+      - name: Verify SQLx offline metadata is current
+        run: |
+          cargo sqlx prepare --workspace --check -- --all-targets --all-features
         env:
-          POSTGRES_DB: vrc_class_reunion_test
-          POSTGRES_USER: vrc_app
-          POSTGRES_PASSWORD: test_password
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    env:
-      DATABASE_URL: postgres://vrc_app:test_password@localhost:5432/vrc_class_reunion_test
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Run migrations
-        run: cargo install sqlx-cli --no-default-features --features rustls,postgres && sqlx migrate run --source vrc-backend/migrations
-      - name: Run tests
-        run: cargo test --all-features -- --test-threads=1
+          SQLX_OFFLINE: "false"
 
-  security:
-    name: Security Audit
-    runs-on: ubuntu-latest
+  doc-check:
+    name: "📖 Documentation"
+    needs: [changes, check-lockfile]
+    if: |
+      always() &&
+      needs.changes.outputs.any_src == 'true' &&
+      (needs.check-lockfile.result == 'success' || needs.check-lockfile.result == 'skipped')
+    runs-on: arc-runner-set
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust-toolchain
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          cache-prefix: "v1-doc"
+
+      - name: cargo doc (deny warnings)
+        run: cargo doc --workspace --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+  check-msrv:
+    name: "📌 MSRV Check"
+    needs: [changes, metadata, check-lockfile]
+    if: |
+      always() &&
+      needs.changes.outputs.any_src == 'true' &&
+      (needs.check-lockfile.result == 'success' || needs.check-lockfile.result == 'skipped')
+    runs-on: arc-runner-set
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust-toolchain
+        with:
+          toolchain: ${{ env.MSRV }}
+          cache-prefix: "v1-msrv"
+
+      - name: cargo check (MSRV ${{ env.MSRV }})
+        run: cargo check --workspace --all-features --locked
+
+  # ===========================================================================
+  # Phase 3: Testing (< 10 min)
+  # ===========================================================================
+
+  test-unit:
+    name: "🧪 Unit Tests"
+    needs: [changes, clippy-stable]
+    if: |
+      always() &&
+      needs.changes.outputs.any_src == 'true' &&
+      needs.clippy-stable.result == 'success'
+    runs-on: arc-runner-set
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust-toolchain
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          cache-prefix: "v1-test-unit"
+
+      - name: cargo test --lib (unit tests only)
+        run: |
+          cargo test \
+            --workspace \
+            --lib \
+            --all-features \
+            -- --test-threads=$(nproc)
+        env:
+          RUST_BACKTRACE: "1"
+
+  test-contract:
+    name: "📋 Contract Tests"
+    needs: [changes, clippy-stable]
+    if: |
+      always() &&
+      needs.changes.outputs.any_src == 'true' &&
+      needs.clippy-stable.result == 'success'
+    runs-on: arc-runner-set
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust-toolchain
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          cache-prefix: "v1-test-contract"
+
+      - name: cargo test (contract tests)
+        run: |
+          for test_target in \
+            router_contract_tests \
+            error_response_contract_tests \
+            query_validation_contract_tests \
+            system_validation_contract_tests; do
+            cargo test \
+              --package vrc-backend \
+              --test "${test_target}" \
+              -- --test-threads=$(nproc)
+          done
+        env:
+          RUST_BACKTRACE: "1"
+
+  test-integration:
+    name: "🔗 Integration Tests"
+    needs: [changes, clippy-stable]
+    if: |
+      always() &&
+      (needs.changes.outputs.rust == 'true' || needs.changes.outputs.migrations == 'true') &&
+      needs.clippy-stable.result == 'success'
+    runs-on: arc-runner-set
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust-toolchain
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          cache-prefix: "v1-test-integration"
+
+      - uses: ./.github/actions/setup-postgres
+        with:
+          migrations-path: "vrc-backend/migrations"
+          postgres-args: "-c shared_buffers=256MB -c work_mem=16MB -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c random_page_cost=1.1"
+
+      - name: cargo test (integration — api_tests)
+        run: |
+          cargo test \
+            --package vrc-backend \
+            --test api_tests \
+            --all-features \
+            -- --test-threads=1
+        env:
+          SQLX_OFFLINE: "false"
+          RUST_BACKTRACE: "1"
+          RUST_LOG: "vrc_backend=debug,sqlx=warn"
+
+      - name: Dump PostgreSQL logs on failure
+        if: failure()
+        run: |
+          CONTAINER=$(docker ps -q --filter "name=pg-ci-")
+          if [[ -n "${CONTAINER}" ]]; then
+            echo "::group::PostgreSQL Logs"
+            docker logs "${CONTAINER}" 2>&1 | tail -50
+            echo "::endgroup::"
+          fi
+
+  test-property:
+    name: "🎲 Property Tests"
+    needs: [changes, metadata, clippy-stable]
+    if: |
+      always() &&
+      needs.changes.outputs.any_src == 'true' &&
+      needs.clippy-stable.result == 'success' &&
+      (needs.metadata.outputs.run_extended == 'true' || github.event_name == 'workflow_dispatch')
+    runs-on: arc-runner-set
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust-toolchain
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          cache-prefix: "v1-test-property"
+
+      - name: cargo test (proptest — extended)
+        run: |
+          cargo test \
+            --workspace \
+            --all-features \
+            -- proptest \
+            --test-threads=$(nproc)
+        env:
+          PROPTEST_CASES: "1000"
+          RUST_BACKTRACE: "1"
+
+      - name: Upload proptest regressions
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proptest-regressions-${{ github.sha }}
+          path: "**/proptest-regressions/**"
+          retention-days: 30
+          if-no-files-found: ignore
+
+  coverage:
+    name: "📊 Code Coverage"
+    needs: [changes, metadata, clippy-stable]
+    if: |
+      always() &&
+      needs.changes.outputs.any_src == 'true' &&
+      needs.clippy-stable.result == 'success' &&
+      needs.metadata.outputs.run_extended == 'true'
+    runs-on: arc-runner-set
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust-toolchain
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: "llvm-tools-preview"
+          cache-prefix: "v1-coverage"
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - uses: ./.github/actions/setup-postgres
+        with:
+          migrations-path: "vrc-backend/migrations"
+
+      - name: Generate coverage report
+        run: |
+          cargo llvm-cov \
+            --workspace \
+            --all-features \
+            --codecov \
+            --output-path codecov.json \
+            -- --test-threads=1
+        env:
+          SQLX_OFFLINE: "false"
+          RUST_BACKTRACE: "1"
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report-${{ github.sha }}
+          path: codecov.json
+          retention-days: 14
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          if [[ -f codecov.json ]]; then
+            echo "## Coverage Report" >> "$GITHUB_STEP_SUMMARY"
+            echo "Coverage data uploaded as artifact." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  # ===========================================================================
+  # Phase 4: Security Scanning (parallel with Phase 3)
+  # ===========================================================================
+
+  security-audit:
+    name: "🛡️ Cargo Audit"
+    needs: [changes]
+    if: needs.changes.outputs.any_src == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: arc-runner-set
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
-      - name: Run cargo audit
-        # sqlx-macros-core pulls sqlx-mysql into build-time dependencies only.
-        # RUSTSEC-2023-0071 has no upstream patch yet and does not affect the shipped runtime path.
-        run: cargo audit --ignore RUSTSEC-2023-0071
+        uses: taiki-e/install-action@cargo-audit
 
-  build:
-    name: Build Image
-    needs: [lint, test, security]
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
+      - name: Run cargo audit
+        run: |
+          cargo audit \
+            --deny warnings \
+            --deny unmaintained \
+            --deny yanked \
+            --json > audit-report.json 2>&1 || true
+
+          if cargo audit --deny warnings --deny unmaintained --deny yanked 2>&1; then
+            echo "✓ No known vulnerabilities"
+          else
+            echo "::error::Security vulnerabilities found in dependencies"
+            cat audit-report.json
+            exit 1
+          fi
+
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-audit-${{ github.sha }}
+          path: audit-report.json
+          retention-days: 30
+          if-no-files-found: ignore
+
+  security-deny:
+    name: "🚫 Cargo Deny"
+    needs: [changes]
+    if: needs.changes.outputs.any_src == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: arc-runner-set
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cargo-deny
+
+      - name: Check advisories
+        run: cargo deny check advisories
+
+      - name: Check licenses
+        run: cargo deny check licenses
+
+      - name: Check bans
+        run: cargo deny check bans
+
+      - name: Check sources
+        run: cargo deny check sources
+
+  secret-detection:
+    name: "🔑 Secret Detection"
+    needs: [changes]
+    if: needs.changes.outputs.any_src == 'true'
+    runs-on: arc-runner-set
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+  # ===========================================================================
+  # Phase 5: Build Verification (< 10 min)
+  # ===========================================================================
+
+  build-release:
+    name: "🔨 Release Build"
+    needs: [changes, clippy-stable, test-unit]
+    if: |
+      always() &&
+      needs.changes.outputs.any_src == 'true' &&
+      needs.clippy-stable.result == 'success' &&
+      needs.test-unit.result == 'success'
+    runs-on: arc-runner-set
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust-toolchain
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          cache-prefix: "v1-build-release"
+          rustflags: "-C target-cpu=x86-64-v3"
+
+      - name: cargo build --release
+        run: |
+          cargo build \
+            --release \
+            --bin vrc-backend \
+            --locked
+
+      - name: Binary size check
+        run: |
+          BINARY="target/release/vrc-backend"
+          SIZE=$(stat -c %s "${BINARY}" 2>/dev/null || stat -f %z "${BINARY}")
+          SIZE_MB=$(echo "scale=2; ${SIZE} / 1048576" | bc)
+          echo "Binary size: ${SIZE_MB} MB (${SIZE} bytes)"
+
+          if (( SIZE > 31457280 )); then
+            echo "::warning::Release binary exceeds 30 MB (${SIZE_MB} MB). Consider optimizing."
+          fi
+
+          echo "## Release Binary" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Metric | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|--------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Size** | ${SIZE_MB} MB |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload release binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: vrc-backend-release-${{ github.sha }}
+          path: target/release/vrc-backend
+          retention-days: 7
+
+  build-docker:
+    name: "🐳 Docker Build"
+    needs: [changes, metadata, clippy-stable, test-unit]
+    if: |
+      always() &&
+      (needs.changes.outputs.docker == 'true' || needs.changes.outputs.rust == 'true' ||
+       needs.metadata.outputs.should_deploy == 'true' || inputs.force_docker_build == true) &&
+      needs.clippy-stable.result == 'success' &&
+      needs.test-unit.result == 'success'
+    uses: ./.github/workflows/reusable-docker-publish.yml
+    with:
+      runner-label: "arc-runner-set"
+      push: ${{ needs.metadata.outputs.should_deploy == 'true' }}
+      scan: true
+      scan-severity: "CRITICAL,HIGH"
+      generate-sbom: ${{ needs.metadata.outputs.should_deploy == 'true' }}
+      timeout: 45
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
+
+  migration-verify:
+    name: "🗃️ Migration Integrity"
+    needs: [changes]
+    if: needs.changes.outputs.migrations == 'true'
+    runs-on: arc-runner-set
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/metadata-action@v5
-        id: meta
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=sha,prefix=
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=raw,value=latest,enable={{is_default_branch}}
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          persist-credentials: false
 
-  deploy:
-    name: Deploy
-    needs: [build]
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    environment: production
-    steps:
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1
+      - uses: ./.github/actions/setup-rust-toolchain
         with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          script: |
-            cd /opt/vrc-backend
-            docker compose -f docker-compose.prod.yml pull app
-            docker compose -f docker-compose.prod.yml up -d app
-            sleep 5
-            curl -sf http://localhost:3000/health || (docker compose -f docker-compose.prod.yml logs app --tail 50 && exit 1)
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          cache-prefix: "v1-migration"
 
-  notify:
-    name: Notify
-    needs: [deploy]
+      - name: Setup fresh PostgreSQL
+        uses: ./.github/actions/setup-postgres
+        with:
+          run-migrations: "false"
+
+      - name: Test migration idempotency
+        run: |
+          echo "::group::Run migrations (first pass)"
+          sqlx migrate run --source vrc-backend/migrations
+          echo "::endgroup::"
+
+          echo "::group::Verify migration state"
+          sqlx migrate info --source vrc-backend/migrations
+          echo "::endgroup::"
+
+          echo "::group::Run migrations again (idempotency check)"
+          sqlx migrate run --source vrc-backend/migrations
+          echo "::endgroup::"
+
+          echo "✓ Migrations are idempotent"
+
+      - name: Verify no pending migrations
+        run: |
+          PENDING=$(sqlx migrate info --source vrc-backend/migrations 2>&1 | grep -c "pending" || true)
+          if (( PENDING > 0 )); then
+            echo "::error::Found ${PENDING} pending migration(s)"
+            exit 1
+          fi
+          echo "✓ No pending migrations"
+
+  # ===========================================================================
+  # Phase 6: CI Gate (all-or-nothing quality gate)
+  # ===========================================================================
+
+  ci-gate:
+    name: "✅ CI Gate"
     if: always()
-    runs-on: ubuntu-latest
+    needs:
+      - changes
+      - metadata
+      - check-lockfile
+      - format
+      - typos
+      - clippy-stable
+      - clippy-nightly
+      - check-sqlx-offline
+      - doc-check
+      - check-msrv
+      - test-unit
+      - test-contract
+      - test-integration
+      - test-property
+      - coverage
+      - security-audit
+      - security-deny
+      - secret-detection
+      - build-release
+      - build-docker
+      - migration-verify
+    runs-on: arc-runner-set
+    timeout-minutes: 5
     steps:
-      - name: Discord Notification
-        uses: sarisia/actions-status-discord@v1
-        if: always()
-        with:
-          webhook: ${{ secrets.DISCORD_DEPLOY_WEBHOOK }}
-          status: ${{ job.status }}
-          title: "VRC Backend Deployment"
-          description: |
-            **Commit:** ${{ github.sha }}
-            **Branch:** ${{ github.ref_name }}
-            **Actor:** ${{ github.actor }}
+      - name: Evaluate pipeline result
+        run: |
+          echo "## CI Pipeline Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Job | Result |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-----|--------|" >> "$GITHUB_STEP_SUMMARY"
+
+          RESULTS=(
+            "Changes:${{ needs.changes.result }}"
+            "Metadata:${{ needs.metadata.result }}"
+            "Lockfile:${{ needs.check-lockfile.result }}"
+            "Format:${{ needs.format.result }}"
+            "Typos:${{ needs.typos.result }}"
+            "Clippy (stable):${{ needs.clippy-stable.result }}"
+            "Clippy (nightly):${{ needs.clippy-nightly.result }}"
+            "SQLx Offline:${{ needs.check-sqlx-offline.result }}"
+            "Doc Check:${{ needs.doc-check.result }}"
+            "MSRV:${{ needs.check-msrv.result }}"
+            "Unit Tests:${{ needs.test-unit.result }}"
+            "Contract Tests:${{ needs.test-contract.result }}"
+            "Integration Tests:${{ needs.test-integration.result }}"
+            "Property Tests:${{ needs.test-property.result }}"
+            "Coverage:${{ needs.coverage.result }}"
+            "Security Audit:${{ needs.security-audit.result }}"
+            "Cargo Deny:${{ needs.security-deny.result }}"
+            "Secret Detection:${{ needs.secret-detection.result }}"
+            "Release Build:${{ needs.build-release.result }}"
+            "Docker Build:${{ needs.build-docker.result }}"
+            "Migration Verify:${{ needs.migration-verify.result }}"
+          )
+
+          FAILED=false
+          for entry in "${RESULTS[@]}"; do
+            NAME="${entry%%:*}"
+            RESULT="${entry##*:}"
+
+            case "${RESULT}" in
+              success)   ICON="✅" ;;
+              failure)   ICON="❌"; FAILED=true ;;
+              cancelled) ICON="⚠️" ;;
+              skipped)   ICON="⏭️" ;;
+              *)         ICON="❓" ;;
+            esac
+
+            echo "| ${NAME} | ${ICON} ${RESULT} |" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          # ── Gate logic: these jobs MUST NOT fail ────────────────────────
+          CRITICAL_JOBS=(
+            "${{ needs.check-lockfile.result }}"
+            "${{ needs.format.result }}"
+            "${{ needs.clippy-stable.result }}"
+            "${{ needs.test-unit.result }}"
+            "${{ needs.test-contract.result }}"
+            "${{ needs.test-integration.result }}"
+            "${{ needs.security-audit.result }}"
+            "${{ needs.secret-detection.result }}"
+            "${{ needs.build-release.result }}"
+          )
+
+          GATE_PASS=true
+          for result in "${CRITICAL_JOBS[@]}"; do
+            if [[ "${result}" == "failure" ]]; then
+              GATE_PASS=false
+              break
+            fi
+          done
+
+          if [[ "${GATE_PASS}" == "true" ]]; then
+            echo "### ✅ CI Gate: PASSED" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### ❌ CI Gate: FAILED" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+  # ===========================================================================
+  # Phase 7: Trigger Deployment (main/tag only)
+  # ===========================================================================
+
+  trigger-deploy:
+    name: "🚀 Trigger Deployment"
+    needs: [ci-gate, metadata, build-docker]
+    if: |
+      always() &&
+      needs.ci-gate.result == 'success' &&
+      needs.metadata.outputs.should_deploy == 'true'
+    uses: ./.github/workflows/cd.yml
+    with:
+      environment: "production"
+      image-tag: "sha-${{ needs.metadata.outputs.sha_short }}"
+      sha: ${{ github.sha }}
+    secrets: inherit
+    permissions:
+      contents: read
+      packages: read
+
+  # ===========================================================================
+  # Phase 8: Notification
+  # ===========================================================================
+
+  notify-failure:
+    name: "📢 Notify (Failure)"
+    needs: [ci-gate]
+    if: failure()
+    uses: ./.github/workflows/reusable-notify.yml
+    with:
+      status: "failure"
+      title: "CI Failed — ${{ github.ref_name }}"
+      additional-message: "Pipeline failed on commit ${{ github.sha }}"
+    secrets:
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_DEPLOY_WEBHOOK }}
+    permissions: {}
+
+  # ===========================================================================
+  # Cleanup: Remove Docker containers from composite actions
+  # ===========================================================================
+
+  cleanup:
+    name: "🧹 Cleanup"
+    if: always()
+    needs:
+      - test-integration
+      - check-sqlx-offline
+      - coverage
+      - migration-verify
+    runs-on: arc-runner-set
+    timeout-minutes: 5
+    steps:
+      - name: Stop PostgreSQL test containers
+        run: |
+          docker ps -a --filter "name=pg-ci-" --format "{{.Names}}" | while read -r name; do
+            echo "Stopping and removing: ${name}"
+            docker stop "${name}" 2>/dev/null || true
+            docker rm -f "${name}" 2>/dev/null || true
+          done
+        continue-on-error: true
+
+      - name: Prune dangling images
+        run: docker image prune -f 2>/dev/null || true
+        continue-on-error: true
