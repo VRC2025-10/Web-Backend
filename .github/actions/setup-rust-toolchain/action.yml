@@ -1,0 +1,106 @@
+# =============================================================================
+#  Composite Action: Setup Rust Toolchain
+#  Installs Rust toolchain with components and configures multi-layer caching
+#  optimized for ARC (Actions Runner Controller) ephemeral runners.
+# =============================================================================
+name: "Setup Rust Toolchain"
+description: "Install Rust toolchain with caching optimized for ARC self-hosted runners"
+
+inputs:
+  toolchain:
+    description: "Rust toolchain version (stable, nightly, 1.85.0, etc.)"
+    required: false
+    default: "stable"
+  components:
+    description: "Additional components (comma-separated: clippy, rustfmt, llvm-tools-preview)"
+    required: false
+    default: ""
+  targets:
+    description: "Additional targets (comma-separated)"
+    required: false
+    default: ""
+  cache-prefix:
+    description: "Cache key prefix for workspace isolation"
+    required: false
+    default: "v1-rust"
+  cache-workspaces:
+    description: "Workspace paths to cache (newline-separated)"
+    required: false
+    default: ". -> target"
+  rustflags:
+    description: "RUSTFLAGS to set (empty = no override)"
+    required: false
+    default: ""
+  cargo-incremental:
+    description: "Enable incremental compilation"
+    required: false
+    default: "0"
+
+outputs:
+  rustc-version:
+    description: "Installed rustc version"
+    value: ${{ steps.toolchain.outputs.rustc }}
+  cargo-version:
+    description: "Installed cargo version"
+    value: ${{ steps.toolchain.outputs.cargo }}
+  cache-hit:
+    description: "Whether the Rust cache was restored"
+    value: ${{ steps.cache.outputs.cache-hit }}
+
+runs:
+  using: "composite"
+  steps:
+    # ── Install toolchain ──────────────────────────────────────────────────
+    - name: Install Rust ${{ inputs.toolchain }}
+      id: toolchain
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ inputs.toolchain }}
+        components: ${{ inputs.components }}
+        targets: ${{ inputs.targets }}
+
+    # ── Configure cargo ────────────────────────────────────────────────────
+    - name: Configure cargo environment
+      shell: bash
+      run: |
+        echo "CARGO_TERM_COLOR=always" >> "$GITHUB_ENV"
+        echo "CARGO_INCREMENTAL=${{ inputs.cargo-incremental }}" >> "$GITHUB_ENV"
+        echo "CARGO_NET_RETRY=10" >> "$GITHUB_ENV"
+        echo "CARGO_HTTP_TIMEOUT=60" >> "$GITHUB_ENV"
+        echo "CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse" >> "$GITHUB_ENV"
+
+        # Set RUSTFLAGS if provided
+        if [[ -n "${{ inputs.rustflags }}" ]]; then
+          echo "RUSTFLAGS=${{ inputs.rustflags }}" >> "$GITHUB_ENV"
+        fi
+
+        # Print toolchain info for debugging
+        echo "::group::Toolchain Info"
+        rustc --version --verbose
+        cargo --version
+        echo "::endgroup::"
+
+    # ── Restore cache ──────────────────────────────────────────────────────
+    - name: Restore Rust cache
+      id: cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        prefix-key: ${{ inputs.cache-prefix }}
+        shared-key: ${{ inputs.toolchain }}
+        workspaces: ${{ inputs.cache-workspaces }}
+        cache-on-failure: true
+        cache-all-crates: true
+
+    # ── Install sccache for distributed caching (self-hosted) ──────────────
+    - name: Install sccache
+      shell: bash
+      run: |
+        if ! command -v sccache &> /dev/null; then
+          echo "::group::Installing sccache"
+          cargo install sccache --locked 2>/dev/null || true
+          echo "::endgroup::"
+        fi
+        if command -v sccache &> /dev/null; then
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+        fi
