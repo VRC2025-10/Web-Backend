@@ -2,12 +2,12 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Report {
     pub id: Uuid,
     pub reporter_user_id: Uuid,
     pub target_type: ReportTargetType,
-    pub target_id: Uuid,
+    pub target_id: String,
     pub reason: String,
     pub status: ReportStatus,
     pub created_at: DateTime<Utc>,
@@ -27,7 +27,7 @@ pub enum ReportTargetType {
 #[sqlx(type_name = "report_status", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum ReportStatus {
-    Pending,
+    Open,
     Reviewed,
     Dismissed,
 }
