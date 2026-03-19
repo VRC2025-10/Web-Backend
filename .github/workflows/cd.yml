@@ -346,7 +346,11 @@ jobs:
   rollback:
     name: "Automatic Rollback"
     needs: [preflight, deploy]
-    if: failure() && needs.preflight.outputs.current_image != 'none'
+    if: |
+      needs.deploy.result == 'failure' &&
+      needs.preflight.result == 'success' &&
+      needs.preflight.outputs.current_image != '' &&
+      needs.preflight.outputs.current_image != 'none'
     runs-on: arc-runner-set
     timeout-minutes: 15
     environment:
@@ -397,7 +401,7 @@ jobs:
   smoke-test:
     name: "Smoke Tests"
     needs: [deploy]
-    if: success()
+    if: needs.deploy.result == 'success'
     runs-on: arc-runner-set
     timeout-minutes: 10
     environment:
