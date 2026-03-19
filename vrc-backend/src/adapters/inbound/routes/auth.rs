@@ -13,10 +13,14 @@ use hmac::{Hmac, Mac};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 
 use crate::AppState;
 use crate::adapters::outbound::discord::client::ReqwestDiscordClient;
 use crate::domain::ports::services::discord_client::DiscordClient;
+use crate::errors::api::ApiError;
+
+use secrecy::ExposeSecret;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -52,26 +56,41 @@ fn validate_redirect(path: &str) -> &str {
 }
 
 /// Sign a payload with HMAC-SHA256.
-fn sign_state(payload: &[u8], secret: &str) -> Vec<u8> {
-    let mut mac =
-        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
+fn sign_state(payload: &[u8], secret: &str) -> Result<Vec<u8>, ApiError> {
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).map_err(|error| {
+        tracing::error!(error = %error, "Failed to initialize OAuth state signer");
+        ApiError::Internal("Failed to initialize OAuth state signer".to_owned())
+    })?;
     mac.update(payload);
-    mac.finalize().into_bytes().to_vec()
+    Ok(mac.finalize().into_bytes().to_vec())
 }
 
 /// Verify HMAC-SHA256 signature.
-fn verify_state(payload: &[u8], signature: &[u8], secret: &str) -> bool {
-    let mut mac =
-        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
+fn verify_state(payload: &[u8], signature: &[u8], secret: &str) -> Result<bool, ApiError> {
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).map_err(|error| {
+        tracing::error!(error = %error, "Failed to initialize OAuth state verifier");
+        ApiError::Internal("Failed to initialize OAuth state verifier".to_owned())
+    })?;
     mac.update(payload);
-    mac.verify_slice(signature).is_ok()
+    Ok(mac.verify_slice(signature).is_ok())
 }
 
+fn expired_oauth_state_cookie(secure: bool) -> Cookie<'static> {
+    Cookie::build(("oauth_state", ""))
+        .http_only(true)
+        .secure(secure)
+        .same_site(axum_extra::extract::cookie::SameSite::Lax)
+        .path("/")
+        .max_age(time::Duration::ZERO)
+        .build()
+}
+
+#[vrc_macros::handler(method = GET, path = "/api/v1/auth/discord/login", rate_limit = "auth", summary = "Start Discord OAuth login")]
 async fn login(
     State(state): State<Arc<AppState>>,
     Query(query): Query<LoginQuery>,
     jar: CookieJar,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, ApiError> {
     let redirect_to = query
         .redirect_to
         .as_deref()
@@ -88,9 +107,12 @@ async fn login(
         expires_at: (Utc::now() + chrono::Duration::minutes(10)).timestamp(),
     };
 
-    let payload_json = serde_json::to_vec(&payload).expect("serialization cannot fail");
+    let payload_json = serde_json::to_vec(&payload).map_err(|error| {
+        tracing::error!(error = %error, "Failed to serialize OAuth state payload");
+        ApiError::Internal("Failed to serialize OAuth state payload".to_owned())
+    })?;
     let payload_b64 = URL_SAFE_NO_PAD.encode(&payload_json);
-    let signature = sign_state(payload_json.as_slice(), &state.config.session_secret);
+    let signature = sign_state(payload_json.as_slice(), state.config.session_secret.expose_secret())?;
     let sig_b64 = URL_SAFE_NO_PAD.encode(&signature);
     let state_token = format!("{payload_b64}.{sig_b64}");
 
@@ -114,62 +136,74 @@ async fn login(
         urlencoding::encode(&state_token)
     );
 
-    (jar.add(oauth_cookie), Redirect::temporary(&discord_url))
+    Ok((jar.add(oauth_cookie), Redirect::temporary(&discord_url)))
 }
 
+#[vrc_macros::handler(method = GET, path = "/api/v1/auth/discord/callback", rate_limit = "auth", summary = "Handle Discord OAuth callback")]
 #[allow(clippy::too_many_lines)] // OAuth callback flow is inherently long
 async fn callback(
     State(state): State<Arc<AppState>>,
     Query(query): Query<CallbackQuery>,
     jar: CookieJar,
-) -> Result<Response, Response> {
+) -> Result<Response, ApiError> {
     let frontend = &state.config.frontend_origin;
+    let cookie_secure = state.config.cookie_secure;
     let error_redirect = |reason: &str| -> Response {
         let url = format!("{frontend}/auth/error?reason={reason}");
-        Redirect::temporary(&url).into_response()
+        (
+            jar.clone()
+                .remove(expired_oauth_state_cookie(cookie_secure)),
+            Redirect::temporary(&url),
+        )
+            .into_response()
     };
 
     // 1. Verify state token
     let parts: Vec<&str> = query.state.splitn(2, '.').collect();
     if parts.len() != 2 {
-        return Err(error_redirect("invalid_state"));
+        return Ok(error_redirect("invalid_state"));
     }
 
-    let payload_bytes = URL_SAFE_NO_PAD
-        .decode(parts[0])
-        .map_err(|_| error_redirect("invalid_state"))?;
-    let sig_bytes = URL_SAFE_NO_PAD
-        .decode(parts[1])
-        .map_err(|_| error_redirect("invalid_state"))?;
+    let Ok(payload_bytes) = URL_SAFE_NO_PAD.decode(parts[0]) else {
+        return Ok(error_redirect("invalid_state"));
+    };
+    let Ok(sig_bytes) = URL_SAFE_NO_PAD.decode(parts[1]) else {
+        return Ok(error_redirect("invalid_state"));
+    };
 
-    if !verify_state(&payload_bytes, &sig_bytes, &state.config.session_secret) {
-        return Err(error_redirect("invalid_state"));
+    if !verify_state(&payload_bytes, &sig_bytes, state.config.session_secret.expose_secret())? {
+        return Ok(error_redirect("invalid_state"));
     }
 
-    let payload: OAuthStatePayload =
-        serde_json::from_slice(&payload_bytes).map_err(|_| error_redirect("invalid_state"))?;
+    let payload: OAuthStatePayload = match serde_json::from_slice(&payload_bytes) {
+        Ok(payload) => payload,
+        Err(_) => return Ok(error_redirect("invalid_state")),
+    };
 
     // Check expiry
     if Utc::now().timestamp() > payload.expires_at {
-        return Err(error_redirect("expired"));
+        return Ok(error_redirect("expired"));
     }
 
     // Compare nonce with cookie
     let cookie_nonce = jar
         .get("oauth_state")
-        .ok_or_else(|| error_redirect("csrf"))?
-        .value()
-        .to_owned();
+        .map(|cookie| cookie.value().to_owned())
+        .unwrap_or_default();
 
-    if cookie_nonce != payload.nonce {
-        return Err(error_redirect("csrf"));
+    if cookie_nonce.is_empty() {
+        return Ok(error_redirect("csrf"));
+    }
+
+    if !bool::from(cookie_nonce.as_bytes().ct_eq(payload.nonce.as_bytes())) {
+        return Ok(error_redirect("csrf"));
     }
 
     // 2. Exchange code for tokens
     let discord = ReqwestDiscordClient::new(
         state.http_client.clone(),
         state.config.discord_client_id.clone(),
-        state.config.discord_client_secret.clone(),
+        state.config.discord_client_secret.expose_secret().to_owned(),
     );
 
     let callback_url = format!(
@@ -177,36 +211,39 @@ async fn callback(
         state.config.backend_base_url
     );
 
-    let token_response = discord
-        .exchange_code(&query.code, &callback_url)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "Discord token exchange failed");
-            error_redirect("discord_error")
-        })?;
+    let token_response = discord.exchange_code(&query.code, &callback_url).await;
+    let token_response = match token_response {
+        Ok(token_response) => token_response,
+        Err(error) => {
+            tracing::error!(error = %error, "Discord token exchange failed");
+            return Ok(error_redirect("discord_error"));
+        }
+    };
 
     // 3. Fetch user
-    let discord_user = discord
-        .get_user(&token_response.access_token)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "Discord get user failed");
-            error_redirect("discord_error")
-        })?;
+    let discord_user = discord.get_user(&token_response.access_token).await;
+    let discord_user = match discord_user {
+        Ok(discord_user) => discord_user,
+        Err(error) => {
+            tracing::error!(error = %error, "Discord get user failed");
+            return Ok(error_redirect("discord_error"));
+        }
+    };
 
     // 4. Verify guild membership
-    let guilds = discord
-        .get_user_guilds(&token_response.access_token)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "Discord get guilds failed");
-            error_redirect("discord_error")
-        })?;
+    let guilds = discord.get_user_guilds(&token_response.access_token).await;
+    let guilds = match guilds {
+        Ok(guilds) => guilds,
+        Err(error) => {
+            tracing::error!(error = %error, "Discord get guilds failed");
+            return Ok(error_redirect("discord_error"));
+        }
+    };
 
     let is_member = guilds.iter().any(|g| g.id == state.config.discord_guild_id);
 
     if !is_member {
-        return Err(error_redirect("not_member"));
+        return Ok(error_redirect("not_member"));
     }
 
     // 5. Upsert user
@@ -235,15 +272,18 @@ async fn callback(
         avatar_url.as_deref(),
     )
     .fetch_one(&state.db_pool)
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "User upsert failed");
-        error_redirect("discord_error")
-    })?;
+    .await;
+    let user = match user {
+        Ok(user) => user,
+        Err(error) => {
+            tracing::error!(error = %error, "User upsert failed");
+            return Ok(error_redirect("discord_error"));
+        }
+    };
 
     // 6. Check suspension
     if user.status == crate::domain::entities::user::UserStatus::Suspended {
-        return Err(error_redirect("suspended"));
+        return Ok(error_redirect("suspended"));
     }
 
     // 7. Create session
@@ -259,7 +299,7 @@ async fn callback(
     #[allow(clippy::cast_precision_loss)]
     let max_age_f64 = state.config.session_max_age_secs as f64;
 
-    sqlx::query!(
+    let session_creation = sqlx::query!(
         r#"
         INSERT INTO sessions (user_id, token_hash, expires_at)
         VALUES ($1, $2, NOW() + make_interval(secs => $3::double precision))
@@ -269,18 +309,13 @@ async fn callback(
         max_age_f64
     )
     .execute(&state.db_pool)
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "Session creation failed");
-        error_redirect("discord_error")
-    })?;
+    .await;
+    if let Err(error) = session_creation {
+        tracing::error!(error = %error, "Session creation failed");
+        return Ok(error_redirect("discord_error"));
+    }
 
     // 8. Clear oauth_state cookie and set session cookie
-    let remove_oauth = Cookie::build(("oauth_state", ""))
-        .http_only(true)
-        .path("/")
-        .max_age(time::Duration::ZERO);
-
     let session_cookie = Cookie::build(("session_id", token_b64))
         .http_only(true)
         .secure(state.config.cookie_secure)
@@ -292,7 +327,8 @@ async fn callback(
     let redirect_url = format!("{frontend}{redirect_to}");
 
     Ok((
-        jar.add(session_cookie).remove(remove_oauth),
+        jar.add(session_cookie)
+            .remove(expired_oauth_state_cookie(state.config.cookie_secure)),
         Redirect::temporary(&redirect_url),
     )
         .into_response())
@@ -307,6 +343,9 @@ pub fn routes() -> Router<Arc<AppState>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Spec refs: auth-api.md "State Token" and authentication-design.md.
+    // Coverage: redirect validation, state signing/verification, and cookie expiry contract.
 
     #[test]
     fn test_validate_redirect_normal_path() {
@@ -351,6 +390,67 @@ mod tests {
     #[test]
     fn test_validate_redirect_just_text() {
         assert_eq!(validate_redirect("notapath"), "/");
+    }
+
+    #[test]
+    fn test_validate_redirect_accepts_relative_query_string() {
+        assert_eq!(validate_redirect("/events?page=2"), "/events?page=2");
+    }
+
+    #[test]
+    fn test_sign_and_verify_state_round_trip() {
+        let payload = br#"{"nonce":"abc","redirect_to":"/dashboard","expires_at":42}"#;
+        let signature = sign_state(payload, "abcdefghijklmnopqrstuvwxyz012345")
+            .expect("signing must succeed");
+
+        let verified = verify_state(payload, &signature, "abcdefghijklmnopqrstuvwxyz012345")
+            .expect("verification must succeed");
+
+        assert!(verified);
+    }
+
+    #[test]
+    fn test_verify_state_rejects_tampered_payload() {
+        let payload = br#"{"nonce":"abc","redirect_to":"/dashboard","expires_at":42}"#;
+        let signature = sign_state(payload, "abcdefghijklmnopqrstuvwxyz012345")
+            .expect("signing must succeed");
+
+        let verified = verify_state(
+            br#"{"nonce":"abc","redirect_to":"/admin","expires_at":42}"#,
+            &signature,
+            "abcdefghijklmnopqrstuvwxyz012345",
+        )
+        .expect("verification must succeed");
+
+        assert!(!verified);
+    }
+
+    #[test]
+    fn test_verify_state_rejects_wrong_secret() {
+        let payload = br#"{"nonce":"abc","redirect_to":"/dashboard","expires_at":42}"#;
+        let signature = sign_state(payload, "abcdefghijklmnopqrstuvwxyz012345")
+            .expect("signing must succeed");
+
+        let verified = verify_state(payload, &signature, "012345abcdefghijklmnopqrstuvwxyz")
+            .expect("verification must succeed");
+
+        assert!(!verified);
+    }
+
+    #[test]
+    fn test_expired_oauth_state_cookie_has_expected_security_attributes() {
+        let cookie = expired_oauth_state_cookie(true);
+
+        assert_eq!(cookie.name(), "oauth_state");
+        assert_eq!(cookie.value(), "");
+        assert_eq!(cookie.http_only(), Some(true));
+        assert_eq!(cookie.secure(), Some(true));
+        assert_eq!(cookie.path(), Some("/"));
+        assert_eq!(
+            cookie.same_site(),
+            Some(axum_extra::extract::cookie::SameSite::Lax)
+        );
+        assert_eq!(cookie.max_age(), Some(time::Duration::ZERO));
     }
 }
 
