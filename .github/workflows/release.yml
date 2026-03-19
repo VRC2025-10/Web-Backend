@@ -1,0 +1,341 @@
+# =============================================================================
+#  Release Automation Pipeline — VRC Backend
+#  ─────────────────────────────────────────────────────────────────────────────
+#  Triggered by pushing a semver tag (v*.*.*).
+#  Generates changelog, creates GitHub Release, builds and publishes
+#  production Docker image with provenance attestation and SBOM.
+# =============================================================================
+name: "Release"
+run-name: "Release ${{ github.ref_name }}"
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-beta.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.2.0)"
+        required: true
+        type: string
+      prerelease:
+        description: "Mark as pre-release"
+        type: boolean
+        default: false
+      dry-run:
+        description: "Dry run (generate changelog but don't publish)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  attestations: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ===========================================================================
+  # Validate Release
+  # ===========================================================================
+
+  validate:
+    name: "✅ Validate Release"
+    runs-on: arc-runner-set
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+      prerelease: ${{ steps.parse.outputs.prerelease }}
+      previous_tag: ${{ steps.prev.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Parse version tag
+        id: parse
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+          # Strip 'v' prefix for bare version
+          VERSION="${TAG#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+          # Check if pre-release
+          if [[ "${TAG}" =~ -(rc|beta|alpha)\. ]] || [[ "${{ inputs.prerelease }}" == "true" ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "Version: ${VERSION}"
+
+      - name: Verify version matches Cargo.toml
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          CARGO_VERSION=$(grep '^version' vrc-backend/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+
+          # For pre-release tags, compare only the base version
+          BASE_VERSION=$(echo "${VERSION}" | sed 's/-.*//')
+
+          if [[ "${CARGO_VERSION}" != "${BASE_VERSION}" ]]; then
+            echo "::error::Version mismatch: tag=${VERSION}, Cargo.toml=${CARGO_VERSION}"
+            echo "Update version in vrc-backend/Cargo.toml before releasing."
+            exit 1
+          fi
+
+          echo "✓ Version ${CARGO_VERSION} matches tag"
+
+      - name: Find previous tag
+        id: prev
+        run: |
+          CURRENT_TAG="${{ inputs.tag || github.ref_name }}"
+          PREV_TAG=$(git describe --tags --abbrev=0 "${CURRENT_TAG}^" 2>/dev/null || echo "")
+          echo "tag=${PREV_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Previous tag: ${PREV_TAG:-'(none — first release)'}"
+
+  # ===========================================================================
+  # Generate Changelog
+  # ===========================================================================
+
+  changelog:
+    name: "📝 Generate Changelog"
+    needs: [validate]
+    runs-on: arc-runner-set
+    timeout-minutes: 10
+    outputs:
+      changelog: ${{ steps.generate.outputs.changelog }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Generate changelog from conventional commits
+        id: generate
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          PREV_TAG="${{ needs.validate.outputs.previous_tag }}"
+
+          if [[ -n "${PREV_TAG}" ]]; then
+            RANGE="${PREV_TAG}..${TAG}"
+          else
+            RANGE="${TAG}"
+          fi
+
+          echo "Generating changelog for range: ${RANGE}"
+
+          {
+            echo "changelog<<CHANGELOG_EOF"
+
+            echo "## What's Changed"
+            echo ""
+
+            # Features
+            FEATURES=$(git log "${RANGE}" --pretty=format:"- %s (%h)" --grep="^feat" 2>/dev/null || true)
+            if [[ -n "${FEATURES}" ]]; then
+              echo "### ✨ Features"
+              echo "${FEATURES}"
+              echo ""
+            fi
+
+            # Bug Fixes
+            FIXES=$(git log "${RANGE}" --pretty=format:"- %s (%h)" --grep="^fix" 2>/dev/null || true)
+            if [[ -n "${FIXES}" ]]; then
+              echo "### 🐛 Bug Fixes"
+              echo "${FIXES}"
+              echo ""
+            fi
+
+            # Performance
+            PERF=$(git log "${RANGE}" --pretty=format:"- %s (%h)" --grep="^perf" 2>/dev/null || true)
+            if [[ -n "${PERF}" ]]; then
+              echo "### ⚡ Performance"
+              echo "${PERF}"
+              echo ""
+            fi
+
+            # Security
+            SECURITY=$(git log "${RANGE}" --pretty=format:"- %s (%h)" --grep="^security\|^sec" 2>/dev/null || true)
+            if [[ -n "${SECURITY}" ]]; then
+              echo "### 🔒 Security"
+              echo "${SECURITY}"
+              echo ""
+            fi
+
+            # CI/CD
+            CI=$(git log "${RANGE}" --pretty=format:"- %s (%h)" --grep="^ci" 2>/dev/null || true)
+            if [[ -n "${CI}" ]]; then
+              echo "### 🔧 CI/CD"
+              echo "${CI}"
+              echo ""
+            fi
+
+            # Other changes
+            OTHER=$(git log "${RANGE}" --pretty=format:"- %s (%h)" \
+              --grep="^feat" --grep="^fix" --grep="^perf" --grep="^ci" --grep="^security\|^sec" \
+              --invert-grep 2>/dev/null || true)
+            if [[ -n "${OTHER}" ]]; then
+              echo "### 📦 Other Changes"
+              echo "${OTHER}"
+              echo ""
+            fi
+
+            echo "---"
+            echo ""
+            echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREV_TAG:-initial}...${TAG}"
+
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+  # ===========================================================================
+  # Build Release Artifacts
+  # ===========================================================================
+
+  build-release:
+    name: "🔨 Build Release Artifacts"
+    needs: [validate]
+    runs-on: arc-runner-set
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: ./.github/actions/setup-rust-toolchain
+        with:
+          toolchain: "stable"
+          cache-prefix: "v1-release-build"
+          rustflags: "-C target-cpu=x86-64-v3"
+
+      - name: Build optimized release binary
+        run: |
+          cargo build \
+            --release \
+            --bin vrc-backend \
+            --locked
+
+          # Strip binary
+          strip target/release/vrc-backend
+
+      - name: Generate build info
+        run: |
+          cat << EOF > target/release/BUILD_INFO.txt
+          Version: ${{ needs.validate.outputs.version }}
+          Commit: ${{ github.sha }}
+          Built: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          Toolchain: $(rustc --version)
+          Target: x86_64-unknown-linux-gnu
+          Profile: release (LTO=fat, codegen-units=1, opt-level=3)
+          EOF
+
+      - name: Create tarball
+        run: |
+          cd target/release
+          tar czf "vrc-backend-${{ needs.validate.outputs.version }}-x86_64-linux.tar.gz" \
+            vrc-backend BUILD_INFO.txt
+          sha256sum "vrc-backend-${{ needs.validate.outputs.version }}-x86_64-linux.tar.gz" \
+            > "vrc-backend-${{ needs.validate.outputs.version }}-x86_64-linux.tar.gz.sha256"
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts-${{ needs.validate.outputs.version }}
+          path: |
+            target/release/vrc-backend-*.tar.gz
+            target/release/vrc-backend-*.tar.gz.sha256
+            target/release/BUILD_INFO.txt
+          retention-days: 30
+
+  # ===========================================================================
+  # Publish Docker Image
+  # ===========================================================================
+
+  publish-docker:
+    name: "🐳 Publish Docker Image"
+    needs: [validate]
+    if: inputs.dry-run != true
+    uses: ./.github/workflows/reusable-docker-publish.yml
+    with:
+      runner-label: "arc-runner-set"
+      push: true
+      scan: true
+      scan-severity: "CRITICAL"
+      generate-sbom: true
+      tag-value: ${{ needs.validate.outputs.version }}
+      timeout: 45
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+
+  # ===========================================================================
+  # Create GitHub Release
+  # ===========================================================================
+
+  create-release:
+    name: "📦 GitHub Release"
+    needs: [validate, changelog, build-release, publish-docker]
+    if: |
+      always() &&
+      needs.validate.result == 'success' &&
+      needs.changelog.result == 'success' &&
+      needs.build-release.result == 'success' &&
+      (needs.publish-docker.result == 'success' || needs.publish-docker.result == 'skipped') &&
+      inputs.dry-run != true
+    runs-on: arc-runner-set
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts-${{ needs.validate.outputs.version }}
+          path: artifacts/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          name: "v${{ needs.validate.outputs.version }}"
+          body: ${{ needs.changelog.outputs.changelog }}
+          prerelease: ${{ needs.validate.outputs.prerelease == 'true' }}
+          draft: false
+          generate_release_notes: false
+          files: |
+            artifacts/vrc-backend-*.tar.gz
+            artifacts/vrc-backend-*.tar.gz.sha256
+            artifacts/BUILD_INFO.txt
+
+  # ===========================================================================
+  # Notification
+  # ===========================================================================
+
+  notify:
+    name: "📢 Release Notification"
+    needs: [validate, create-release, publish-docker]
+    if: always()
+    uses: ./.github/workflows/reusable-notify.yml
+    with:
+      status: ${{ needs.create-release.result == 'success' && 'success' || 'failure' }}
+      title: "Release v${{ needs.validate.outputs.version }}"
+      image-tag: "v${{ needs.validate.outputs.version }}"
+      additional-message: |
+        Release ${{ needs.validate.outputs.prerelease == 'true' && '(pre-release)' || '(stable)' }} published.
+        Docker: `${{ github.repository }}:${{ needs.validate.outputs.version }}`
+    secrets:
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_DEPLOY_WEBHOOK }}
+    permissions: {}
