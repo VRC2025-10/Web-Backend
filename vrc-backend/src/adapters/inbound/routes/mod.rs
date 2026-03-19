@@ -11,28 +11,41 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
-use axum::http::{Method, header};
+use axum::http::{HeaderName, Method, header, HeaderValue};
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::AppState;
 use crate::adapters::inbound::middleware::csrf::CsrfLayer;
 use crate::adapters::inbound::middleware::metrics::MetricsLayer;
 use crate::adapters::inbound::middleware::rate_limit::{
-    KeyExtractor, RateLimitLayer, auth_tier, build_limiter, internal_tier, public_tier, system_tier,
+    KeyExtractor, RateLimitConfigError, RateLimitLayer, auth_tier, build_limiter, internal_tier,
+    public_tier, system_tier,
 };
 use crate::adapters::inbound::middleware::request_id::RequestIdLayer;
-use crate::adapters::inbound::middleware::security_headers::apply_security_headers;
+use crate::adapters::inbound::middleware::security_headers::SecurityHeadersLayer;
 
-pub fn build_router(state: Arc<AppState>) -> Router {
+#[derive(Debug, thiserror::Error)]
+pub enum RouteBuildError {
+    #[error("Failed to build {layer} rate limiter: {source}")]
+    RateLimiter {
+        layer: &'static str,
+        #[source]
+        source: RateLimitConfigError,
+    },
+}
+
+pub fn build_router(state: Arc<AppState>) -> Result<Router, RouteBuildError> {
+    const X_TOTAL_COUNT: HeaderName = HeaderName::from_static("x-total-count");
+    const X_TOTAL_PAGES: HeaderName = HeaderName::from_static("x-total-pages");
+
     let frontend_origin = state.config.frontend_origin.clone();
 
     // CORS — single origin, credentials allowed (cookie-based auth)
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::exact(
-            frontend_origin
-                .parse()
-                .expect("FRONTEND_ORIGIN must be a valid header value"),
+            state.config.frontend_origin_header.clone(),
         ))
         .allow_methods([
             Method::GET,
@@ -42,39 +55,87 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             Method::DELETE,
         ])
         .allow_headers([header::CONTENT_TYPE, header::ACCEPT, header::ORIGIN])
+        .expose_headers([X_TOTAL_COUNT, X_TOTAL_PAGES])
         .allow_credentials(true)
         .max_age(Duration::from_secs(3600));
 
     // Rate limiters per tier
-    let public_limiter = build_limiter(&public_tier());
-    let internal_limiter = build_limiter(&internal_tier());
-    let system_limiter = build_limiter(&system_tier());
-    let auth_limiter = build_limiter(&auth_tier());
+    let public_cfg = public_tier();
+    let internal_cfg = internal_tier();
+    let system_cfg = system_tier();
+    let auth_cfg = auth_tier();
+
+    let public_limiter =
+        build_limiter(&public_cfg).map_err(|source| RouteBuildError::RateLimiter {
+            layer: public_cfg.layer,
+            source,
+        })?;
+    let internal_limiter =
+        build_limiter(&internal_cfg).map_err(|source| RouteBuildError::RateLimiter {
+            layer: internal_cfg.layer,
+            source,
+        })?;
+    let system_limiter =
+        build_limiter(&system_cfg).map_err(|source| RouteBuildError::RateLimiter {
+            layer: system_cfg.layer,
+            source,
+        })?;
+    let auth_limiter = build_limiter(&auth_cfg).map_err(|source| RouteBuildError::RateLimiter {
+        layer: auth_cfg.layer,
+        source,
+    })?;
 
     // CSRF layer — only for internal (cookie-authenticated) routes
     let csrf = CsrfLayer::new(&frontend_origin);
+
+    let trust_xff = state.config.trust_x_forwarded_for;
 
     // Per-tier routers with rate limiting applied
     let internal_routes = Router::new()
         .merge(internal::routes())
         .nest("/admin", admin::routes())
         .layer(csrf)
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("private, no-store"),
+        ))
         .layer(RateLimitLayer::new(
             internal_limiter,
             KeyExtractor::PerUserOrIp,
+            internal_cfg.layer,
+            trust_xff,
         ));
 
     let public_routes = Router::new()
         .merge(public::routes())
-        .layer(RateLimitLayer::new(public_limiter, KeyExtractor::PerIp));
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=30, stale-while-revalidate=60"),
+        ))
+        .layer(RateLimitLayer::new(
+            public_limiter,
+            KeyExtractor::PerIp,
+            public_cfg.layer,
+            trust_xff,
+        ));
 
     let system_routes = Router::new()
         .merge(system::routes())
-        .layer(RateLimitLayer::new(system_limiter, KeyExtractor::Global));
+        .layer(RateLimitLayer::new(
+            system_limiter,
+            KeyExtractor::Global,
+            system_cfg.layer,
+            trust_xff,
+        ));
 
     let auth_routes = Router::new()
         .merge(auth::routes())
-        .layer(RateLimitLayer::new(auth_limiter, KeyExtractor::PerIp));
+        .layer(RateLimitLayer::new(
+            auth_limiter,
+            KeyExtractor::PerIp,
+            auth_cfg.layer,
+            trust_xff,
+        ));
 
     let router = Router::new()
         .merge(health::routes())
@@ -89,8 +150,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .layer(TraceLayer::new_for_http())
         .layer(MetricsLayer)
         .layer(RequestIdLayer)
+        // Security headers: single layer instead of 6 separate SetResponseHeaderLayer wrappers
+        .layer(SecurityHeadersLayer)
         .with_state(state);
 
-    // Security headers applied last (wraps everything)
-    apply_security_headers(router)
+    Ok(router)
 }
