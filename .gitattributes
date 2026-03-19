@@ -1,0 +1,45 @@
+# =============================================================================
+#  Git Attributes — VRC Web-Backend
+#  Normalize line endings, mark binary files, configure linguist.
+# =============================================================================
+
+# Default: auto-detect and normalize line endings
+* text=auto eol=lf
+
+# Source code
+*.rs text eol=lf
+*.toml text eol=lf
+*.sql text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+
+# Shell scripts
+*.sh text eol=lf
+
+# Docker
+Dockerfile text eol=lf
+.dockerignore text eol=lf
+
+# Config
+Caddyfile text eol=lf
+.editorconfig text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
+
+# Lock files — do not diff
+Cargo.lock text -diff linguist-generated=true
+
+# SQLx query cache — generated, exclude from language stats
+.sqlx/**/*.json linguist-generated=true
+
+# Build artifacts — binary
+*.exe binary
+*.so binary
+*.dylib binary
+*.dll binary
+
+# Specification docs — exclude from language stats
+specs/** linguist-documentation=true
+docs/** linguist-documentation=true
