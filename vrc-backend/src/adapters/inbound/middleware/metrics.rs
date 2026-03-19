@@ -28,40 +28,50 @@ pub struct MetricsMiddleware<S> {
 
 /// Normalize path to avoid high-cardinality label explosion.
 /// Replaces UUID path segments and numeric IDs with `:id`.
+/// Writes directly into a pre-allocated String to minimize allocations.
 fn normalize_path(path: &str) -> String {
-    path.split('/')
-        .map(|segment| {
-            // Replace UUID-like segments or pure-numeric IDs with :id
-            // to avoid high-cardinality label explosion in Prometheus
-            if is_uuid_like(segment)
-                || (!segment.is_empty()
-                    && segment.len() <= 20
-                    && segment.chars().all(|c| c.is_ascii_digit()))
-            {
-                ":id"
-            } else {
-                segment
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("/")
+    // Fast path: most API paths are short and have no IDs
+    let mut result = String::with_capacity(path.len());
+    let mut first = true;
+
+    for segment in path.split('/') {
+        if !first {
+            result.push('/');
+        }
+        first = false;
+
+        if is_uuid_like(segment)
+            || (!segment.is_empty()
+                && segment.len() <= 20
+                && segment.as_bytes().iter().all(u8::is_ascii_digit))
+        {
+            result.push_str(":id");
+        } else {
+            result.push_str(segment);
+        }
+    }
+    result
 }
 
 /// Check whether a segment looks like a UUID (with or without hyphens).
+/// Uses byte-level checks throughout to avoid UTF-8 overhead.
+#[inline]
 fn is_uuid_like(s: &str) -> bool {
-    match s.len() {
+    let bytes = s.as_bytes();
+    match bytes.len() {
         // UUID with hyphens: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
         36 => {
-            s.as_bytes().iter().enumerate().all(|(i, &b)| {
-                if i == 8 || i == 13 || i == 18 || i == 23 {
-                    b == b'-'
-                } else {
-                    b.is_ascii_hexdigit()
-                }
-            })
+            bytes[8] == b'-'
+                && bytes[13] == b'-'
+                && bytes[18] == b'-'
+                && bytes[23] == b'-'
+                && bytes
+                    .iter()
+                    .enumerate()
+                    .all(|(i, &b)| i == 8 || i == 13 || i == 18 || i == 23 || b.is_ascii_hexdigit())
         }
         // UUID without hyphens: 32 hex digits
-        32 => s.bytes().all(|b| b.is_ascii_hexdigit()),
+        32 => bytes.iter().all(u8::is_ascii_hexdigit),
         _ => false,
     }
 }
@@ -85,7 +95,17 @@ where
     }
 
     fn call(&mut self, req: Request<Body>) -> Self::Future {
-        let method = req.method().to_string();
+        // Use static str for method to avoid per-request allocation
+        let method: &'static str = match *req.method() {
+            axum::http::Method::GET => "GET",
+            axum::http::Method::POST => "POST",
+            axum::http::Method::PUT => "PUT",
+            axum::http::Method::PATCH => "PATCH",
+            axum::http::Method::DELETE => "DELETE",
+            axum::http::Method::HEAD => "HEAD",
+            axum::http::Method::OPTIONS => "OPTIONS",
+            _ => "OTHER",
+        };
         let path = normalize_path(req.uri().path());
         let start = Instant::now();
 
@@ -101,12 +121,15 @@ where
 
             match &result {
                 Ok(response) => {
-                    let status = response.status().as_u16().to_string();
+                    // Use itoa-style formatting to avoid allocation for status code
+                    let status_code = response.status().as_u16();
+                    let mut status_buf = itoa::Buffer::new();
+                    let status = status_buf.format(status_code);
                     metrics::counter!(
                         "http_requests_total",
-                        "method" => method.clone(),
+                        "method" => method,
                         "path" => path.clone(),
-                        "status" => status,
+                        "status" => status.to_owned(),
                     )
                     .increment(1);
                     metrics::histogram!(
@@ -119,8 +142,8 @@ where
                 Err(_) => {
                     metrics::counter!(
                         "http_requests_total",
-                        "method" => method.clone(),
-                        "path" => path.clone(),
+                        "method" => method,
+                        "path" => path,
                         "status" => "500",
                     )
                     .increment(1);
