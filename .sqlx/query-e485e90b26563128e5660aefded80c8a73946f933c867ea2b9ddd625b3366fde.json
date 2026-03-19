@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT u.discord_id, u.discord_display_name, u.discord_avatar_hash,\n               u.joined_at,\n               p.nickname, p.vrc_id, p.x_id, p.bio_html, p.avatar_url,\n               p.updated_at as profile_updated_at\n        FROM users u\n        LEFT JOIN profiles p ON p.user_id = u.id AND p.is_public = true\n        WHERE u.discord_id = $1 AND u.status = 'active'\n        ",
+  "query": "\n        SELECT u.discord_id, u.discord_display_name, u.discord_avatar_hash,\n               u.joined_at,\n               p.nickname, p.vrc_id, p.x_id, p.bio_html, p.avatar_url\n        FROM users u\n        JOIN profiles p ON p.user_id = u.id AND p.is_public = true\n        WHERE u.status = 'active'\n        ORDER BY u.joined_at DESC\n        LIMIT $1 OFFSET $2\n        ",
   "describe": {
     "columns": [
       {
@@ -47,16 +47,12 @@
         "ordinal": 8,
         "name": "avatar_url",
         "type_info": "Text"
-      },
-      {
-        "ordinal": 9,
-        "name": "profile_updated_at",
-        "type_info": "Timestamptz"
       }
     ],
     "parameters": {
       "Left": [
-        "Text"
+        "Int8",
+        "Int8"
       ]
     },
     "nullable": [
@@ -68,9 +64,8 @@
       true,
       true,
       false,
-      true,
-      false
+      true
     ]
   },
-  "hash": "2fac648c4eae65232427b16c6171fda3fee0f0f07a48ef5cce657d17814d4a5a"
+  "hash": "e485e90b26563128e5660aefded80c8a73946f933c867ea2b9ddd625b3366fde"
 }

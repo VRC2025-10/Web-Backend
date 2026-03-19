@@ -16,7 +16,7 @@
             "name": "report_status",
             "kind": {
               "Enum": [
-                "pending",
+                "open",
                 "reviewed",
                 "dismissed"
               ]
