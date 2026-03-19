@@ -8,7 +8,7 @@ pub trait ReportRepository: Send + Sync {
         &self,
         reporter_user_id: Uuid,
         target_type: ReportTargetType,
-        target_id: Uuid,
+        target_id: &str,
         reason: &str,
     ) -> impl std::future::Future<Output = Result<Report, InfraError>> + Send;
 
@@ -16,6 +16,6 @@ pub trait ReportRepository: Send + Sync {
         &self,
         reporter_user_id: Uuid,
         target_type: ReportTargetType,
-        target_id: Uuid,
+        target_id: &str,
     ) -> impl std::future::Future<Output = Result<bool, InfraError>> + Send;
 }
