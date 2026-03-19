@@ -1,9 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-#[cfg(test)]
-use std::sync::LazyLock;
 
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -13,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::AppState;
+use crate::adapters::inbound::extractors::{ValidatedJson, ValidatedPayload, ValidatedQuery};
 use crate::adapters::outbound::markdown::renderer::PulldownCmarkRenderer;
 use crate::auth::extractor::AuthenticatedUser;
 use crate::auth::roles::Member;
@@ -22,16 +21,6 @@ use crate::domain::ports::services::markdown_renderer::MarkdownRenderer;
 use crate::domain::ports::services::webhook_sender::{EmbedField, WebhookSender};
 use crate::domain::value_objects::pagination::{PageRequest, PageResponse};
 use crate::errors::api::ApiError;
-
-#[cfg(test)]
-static VRC_ID_RE: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
-    regex_lite::Regex::new(r"^usr_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-        .expect("valid regex")
-});
-
-#[cfg(test)]
-static X_ID_RE: LazyLock<regex_lite::Regex> =
-    LazyLock::new(|| regex_lite::Regex::new(r"^[a-zA-Z0-9_]{1,15}$").expect("valid regex"));
 
 // ===== Profile types =====
 
@@ -62,12 +51,22 @@ struct ProfileUpdateRequest {
     is_public: bool,
 }
 
+impl ValidatedPayload for ProfileUpdateRequest {
+    fn validate_payload(&self) -> Result<(), HashMap<String, String>> {
+        self.validate()
+    }
+
+    fn validation_error(errors: HashMap<String, String>) -> ApiError {
+        ApiError::ProfileValidation(errors)
+    }
+}
+
 // ===== Report types =====
 
 #[derive(Deserialize)]
 struct CreateReportRequest {
     target_type: ReportTargetType,
-    target_id: Uuid,
+    target_id: String,
     reason: String,
 }
 
@@ -75,7 +74,7 @@ struct CreateReportRequest {
 struct ReportResponse {
     id: Uuid,
     target_type: ReportTargetType,
-    target_id: Uuid,
+    target_id: String,
     status: crate::domain::entities::report::ReportStatus,
     created_at: chrono::DateTime<Utc>,
 }
@@ -138,8 +137,111 @@ fn none_if_empty(s: String) -> Option<String> {
     if s.is_empty() { None } else { Some(s) }
 }
 
+fn contains_html_event_handler(html: &str) -> bool {
+    let bytes = html.as_bytes();
+
+    for index in 0..bytes.len() {
+        let previous_is_boundary = index == 0 || !is_html_attribute_char(bytes[index - 1]);
+        if !previous_is_boundary || bytes[index] != b'o' {
+            continue;
+        }
+
+        let Some(next_index) = index.checked_add(1) else {
+            continue;
+        };
+        if bytes.get(next_index) != Some(&b'n') {
+            continue;
+        }
+
+        let mut cursor = index + 2;
+        if bytes
+            .get(cursor)
+            .is_none_or(|byte| !is_html_attribute_char(*byte))
+        {
+            continue;
+        }
+
+        while let Some(byte) = bytes.get(cursor) {
+            if !is_html_attribute_char(*byte) {
+                break;
+            }
+            cursor += 1;
+        }
+
+        if bytes.get(cursor) == Some(&b'=') {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn is_html_attribute_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b':')
+}
+
+#[derive(Debug)]
+enum NormalizedReportTarget {
+    Profile(String),
+    Resource { text_id: String, uuid: Uuid },
+}
+
+fn normalize_report_target(
+    target_type: ReportTargetType,
+    raw_target_id: &str,
+) -> Result<NormalizedReportTarget, ApiError> {
+    let trimmed = raw_target_id.trim();
+    if trimmed.is_empty() {
+        return Err(ApiError::ReportTargetNotFound);
+    }
+
+    match target_type {
+        ReportTargetType::Profile => Ok(NormalizedReportTarget::Profile(trimmed.to_owned())),
+        ReportTargetType::Event => Err(ApiError::ValidationError(HashMap::from([(
+            "target_type".to_owned(),
+            "Event reports are not supported".to_owned(),
+        )]))),
+        ReportTargetType::Club | ReportTargetType::GalleryImage => {
+            let parsed = Uuid::parse_str(trimmed).map_err(|_| ApiError::ReportTargetNotFound)?;
+            Ok(NormalizedReportTarget::Resource {
+                text_id: parsed.hyphenated().to_string(),
+                uuid: parsed,
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+fn is_valid_vrc_id(value: &str) -> bool {
+    const HYPHEN_POSITIONS: [usize; 4] = [12, 17, 22, 27];
+
+    if value.len() != 40 || !value.starts_with("usr_") {
+        return false;
+    }
+
+    value.as_bytes().iter().enumerate().all(|(index, byte)| {
+        if index < 4 {
+            return true;
+        }
+        if HYPHEN_POSITIONS.contains(&index) {
+            *byte == b'-'
+        } else {
+            byte.is_ascii_digit() || matches!(*byte, b'a'..=b'f')
+        }
+    })
+}
+
+#[cfg(test)]
+fn is_valid_x_id(value: &str) -> bool {
+    (1..=15).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
 // ===== Handlers =====
 
+#[vrc_macros::handler(method = GET, path = "/api/v1/internal/auth/me", role = Member, rate_limit = "internal", summary = "Get current user")]
 async fn get_me(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedUser<Member>,
@@ -178,11 +280,12 @@ async fn get_me(
     }))
 }
 
+#[vrc_macros::handler(method = POST, path = "/api/v1/internal/auth/logout", role = Member, rate_limit = "internal", summary = "Logout current user")]
 async fn logout(
     State(state): State<Arc<AppState>>,
     _auth: AuthenticatedUser<Member>,
     jar: axum_extra::extract::CookieJar,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, ApiError> {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use sha2::{Digest, Sha256};
@@ -202,6 +305,9 @@ async fn logout(
         .await
         {
             tracing::error!(error = %e, "Failed to delete session during logout");
+            return Err(ApiError::Internal(
+                "Failed to invalidate session during logout".to_owned(),
+            ));
         }
     }
 
@@ -212,9 +318,10 @@ async fn logout(
         .path("/")
         .max_age(time::Duration::ZERO);
 
-    (jar.remove(remove_cookie), StatusCode::NO_CONTENT)
+    Ok((jar.remove(remove_cookie), StatusCode::NO_CONTENT))
 }
 
+#[vrc_macros::handler(method = GET, path = "/api/v1/internal/me/profile", role = Member, rate_limit = "internal", summary = "Get own profile")]
 async fn get_my_profile(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedUser<Member>,
@@ -245,16 +352,12 @@ async fn get_my_profile(
     }))
 }
 
+#[vrc_macros::handler(method = PUT, path = "/api/v1/internal/me/profile", role = Member, rate_limit = "internal", summary = "Update own profile")]
 async fn update_my_profile(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedUser<Member>,
-    Json(body): Json<ProfileUpdateRequest>,
+    ValidatedJson(body): ValidatedJson<ProfileUpdateRequest>,
 ) -> Result<Json<OwnProfile>, ApiError> {
-    // Validate fields via derive macro
-    if let Err(errors) = body.validate() {
-        return Err(ApiError::ProfileValidation(errors));
-    }
-
     let bio_markdown = body.bio_markdown.unwrap_or_default();
 
     // Render markdown to HTML (ammonia sanitizes the output)
@@ -269,9 +372,7 @@ async fn update_my_profile(
     if lower_html.contains("<script")
         || lower_html.contains("javascript:")
         || lower_html.contains("vbscript:")
-        || regex_lite::Regex::new(r"on\w+=")
-            .expect("valid regex")
-            .is_match(&lower_html)
+        || contains_html_event_handler(&lower_html)
     {
         tracing::warn!(
             user_id = %auth.user.id,
@@ -322,11 +423,12 @@ async fn update_my_profile(
     }))
 }
 
+#[vrc_macros::handler(method = GET, path = "/api/v1/internal/events", role = Member, rate_limit = "internal", summary = "List internal events")]
 async fn list_events(
     State(state): State<Arc<AppState>>,
     _auth: AuthenticatedUser<Member>,
-    Query(query): Query<EventListQuery>,
-) -> Result<Json<PageResponse<EventSummary>>, ApiError> {
+    ValidatedQuery(query): ValidatedQuery<EventListQuery>,
+) -> Result<PageResponse<EventSummary>, ApiError> {
     let now = Utc::now();
 
     let events = sqlx::query_as!(
@@ -400,32 +502,38 @@ async fn list_events(
         })
         .collect();
 
-    Ok(Json(PageResponse::new(items, count, query.page.per_page())))
+    Ok(PageResponse::new(items, count, query.page.per_page()))
 }
 
 #[allow(clippy::too_many_lines)] // Multi-step report with target validation
+#[vrc_macros::handler(method = POST, path = "/api/v1/internal/reports", role = Member, rate_limit = "internal", summary = "Create moderation report")]
 async fn create_report(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedUser<Member>,
     Json(body): Json<CreateReportRequest>,
 ) -> Result<(StatusCode, Json<ReportResponse>), ApiError> {
-    // Validate reason length
-    if body.reason.len() < 10 || body.reason.len() > 1000 {
+    let normalized_target = normalize_report_target(body.target_type, &body.target_id)?;
+    let normalized_target_id = match &normalized_target {
+        NormalizedReportTarget::Profile(target_id) => target_id.clone(),
+        NormalizedReportTarget::Resource { text_id, .. } => text_id.clone(),
+    };
+    let reason = body.reason.trim().to_owned();
+
+    if reason.len() < 10 || reason.len() > 1000 {
         return Err(ApiError::ReportReasonLength);
     }
 
-    // Check for duplicate report
-    let exists = sqlx::query_scalar!(
+    let exists = sqlx::query_scalar::<_, bool>(
         r#"
         SELECT EXISTS(
             SELECT 1 FROM reports
             WHERE reporter_user_id = $1 AND target_type = $2 AND target_id = $3
-        ) as "exists!: bool"
+        )
         "#,
-        auth.user.id,
-        body.target_type as ReportTargetType,
-        body.target_id,
     )
+    .bind(auth.user.id)
+    .bind(body.target_type)
+    .bind(&normalized_target_id)
     .fetch_one(&state.db_pool)
     .await
     .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -434,57 +542,52 @@ async fn create_report(
         return Err(ApiError::DuplicateReport);
     }
 
-    // Verify target exists based on target_type
-    let target_exists = match body.target_type {
-        ReportTargetType::Profile => sqlx::query_scalar!(
-            r#"SELECT EXISTS(SELECT 1 FROM profiles WHERE user_id = $1) as "exists!: bool""#,
-            body.target_id
+    let target_exists = match normalized_target {
+        NormalizedReportTarget::Profile(profile_target_id) => sqlx::query_scalar::<_, bool>(
+            r#"SELECT EXISTS(
+                SELECT 1 FROM users u JOIN profiles p ON p.user_id = u.id
+                WHERE u.discord_id = $1
+            )"#,
         )
+        .bind(profile_target_id)
         .fetch_one(&state.db_pool)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?,
-        ReportTargetType::Event => sqlx::query_scalar!(
-            r#"SELECT EXISTS(SELECT 1 FROM events WHERE id = $1) as "exists!: bool""#,
-            body.target_id
-        )
-        .fetch_one(&state.db_pool)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?,
-        ReportTargetType::Club => sqlx::query_scalar!(
-            r#"SELECT EXISTS(SELECT 1 FROM clubs WHERE id = $1) as "exists!: bool""#,
-            body.target_id
-        )
-        .fetch_one(&state.db_pool)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?,
-        ReportTargetType::GalleryImage => sqlx::query_scalar!(
-            r#"SELECT EXISTS(SELECT 1 FROM gallery_images WHERE id = $1) as "exists!: bool""#,
-            body.target_id
-        )
-        .fetch_one(&state.db_pool)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?,
+        NormalizedReportTarget::Resource { uuid, .. }
+            if body.target_type == ReportTargetType::Club =>
+        {
+            sqlx::query_scalar::<_, bool>(r#"SELECT EXISTS(SELECT 1 FROM clubs WHERE id = $1)"#)
+                .bind(uuid)
+                .fetch_one(&state.db_pool)
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?
+        }
+        NormalizedReportTarget::Resource { uuid, .. } => {
+            sqlx::query_scalar::<_, bool>(
+                r#"SELECT EXISTS(SELECT 1 FROM gallery_images WHERE id = $1)"#,
+            )
+            .bind(uuid)
+            .fetch_one(&state.db_pool)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?
+        }
     };
 
     if !target_exists {
         return Err(ApiError::ReportTargetNotFound);
     }
 
-    // Create report
-    let report = sqlx::query_as!(
-        crate::domain::entities::report::Report,
+    let report = sqlx::query_as::<_, crate::domain::entities::report::Report>(
         r#"
         INSERT INTO reports (reporter_user_id, target_type, target_id, reason)
         VALUES ($1, $2, $3, $4)
-        RETURNING id, reporter_user_id, target_type as "target_type: ReportTargetType",
-                  target_id, reason, status as "status: crate::domain::entities::report::ReportStatus",
-                  created_at
+        RETURNING id, reporter_user_id, target_type, target_id, reason, status, created_at
         "#,
-        auth.user.id,
-        body.target_type as ReportTargetType,
-        body.target_id,
-        body.reason
     )
+    .bind(auth.user.id)
+    .bind(body.target_type)
+    .bind(&normalized_target_id)
+    .bind(&reason)
     .fetch_one(&state.db_pool)
     .await
     .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -504,7 +607,7 @@ async fn create_report(
             },
             EmbedField {
                 name: "Reason".to_owned(),
-                value: body.reason.chars().take(200).collect(),
+                value: reason.chars().take(200).collect(),
                 inline: false,
             },
         ];
@@ -547,69 +650,165 @@ pub fn routes() -> Router<Arc<AppState>> {
 mod tests {
     use super::*;
 
+    // Spec refs: internal-api.md report creation contract and application-security.md input validation.
+    // Coverage: helper normalization, XSS event-handler detection, and validation boundaries.
+
+    #[test]
+    fn test_none_if_empty_converts_empty_string_to_none() {
+        assert_eq!(none_if_empty(String::new()), None);
+    }
+
+    #[test]
+    fn test_none_if_empty_preserves_non_empty_string() {
+        assert_eq!(none_if_empty("hello".to_owned()), Some("hello".to_owned()));
+    }
+
+    #[test]
+    fn test_contains_html_event_handler_detects_event_handler_attribute() {
+        assert!(contains_html_event_handler(r#"<img src=\"x\" onload=\"alert(1)\">"#));
+    }
+
+    #[test]
+    fn test_contains_html_event_handler_ignores_data_attribute_prefixes() {
+        assert!(!contains_html_event_handler(r#"<div data-onclick=\"noop\"></div>"#));
+    }
+
+    #[test]
+    fn test_contains_html_event_handler_ignores_embedded_on_substrings() {
+        assert!(!contains_html_event_handler(r#"<div json=\"value\"></div>"#));
+    }
+
+    #[test]
+    fn test_normalize_report_target_trims_profile_identifier() {
+        let target = normalize_report_target(ReportTargetType::Profile, "  123456789012345678  ")
+            .expect("trimmed profile id must be accepted");
+
+        match target {
+            NormalizedReportTarget::Profile(target_id) => {
+                assert_eq!(target_id, "123456789012345678");
+            }
+            NormalizedReportTarget::Resource { .. } => panic!("profile target must stay string based"),
+        }
+    }
+
+    #[test]
+    fn test_normalize_report_target_rejects_empty_identifier() {
+        let error = normalize_report_target(ReportTargetType::Profile, "   ")
+            .expect_err("empty target must be rejected");
+
+        assert!(matches!(error, ApiError::ReportTargetNotFound));
+    }
+
+    #[test]
+    fn test_normalize_report_target_rejects_event_reports() {
+        let error = normalize_report_target(
+            ReportTargetType::Event,
+            "550e8400-e29b-41d4-a716-446655440000",
+        )
+        .expect_err("event reports must be rejected");
+
+        assert!(matches!(error, ApiError::ValidationError(details) if details.get("target_type") == Some(&"Event reports are not supported".to_owned())));
+    }
+
+    #[test]
+    fn test_normalize_report_target_normalizes_resource_uuid_to_hyphenated_lowercase() {
+        let target = normalize_report_target(
+            ReportTargetType::Club,
+            "550E8400-E29B-41D4-A716-446655440000",
+        )
+        .expect("valid UUID must be accepted");
+
+        match target {
+            NormalizedReportTarget::Resource { text_id, uuid } => {
+                assert_eq!(uuid, Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").expect("uuid must parse"));
+                assert_eq!(text_id, "550e8400-e29b-41d4-a716-446655440000");
+            }
+            NormalizedReportTarget::Profile(_) => panic!("club target must normalize as resource"),
+        }
+    }
+
+    #[test]
+    fn test_normalize_report_target_rejects_malformed_resource_uuid() {
+        let error = normalize_report_target(ReportTargetType::GalleryImage, "not-a-uuid")
+            .expect_err("malformed UUID must be rejected");
+
+        assert!(matches!(error, ApiError::ReportTargetNotFound));
+    }
+
     // ===== VRC ID validation =====
 
     #[test]
     fn test_validate_vrc_id_valid() {
         let id = "usr_12345678-1234-1234-1234-123456789abc";
-        assert!(VRC_ID_RE.is_match(id));
+        assert!(is_valid_vrc_id(id));
     }
 
     #[test]
     fn test_validate_vrc_id_missing_prefix() {
         let id = "12345678-1234-1234-1234-123456789abc";
-        assert!(!VRC_ID_RE.is_match(id));
+        assert!(!is_valid_vrc_id(id));
     }
 
     #[test]
     fn test_validate_vrc_id_uppercase_rejected() {
         let id = "usr_12345678-1234-1234-1234-123456789ABC";
-        assert!(!VRC_ID_RE.is_match(id));
+        assert!(!is_valid_vrc_id(id));
     }
 
     #[test]
     fn test_validate_vrc_id_too_short() {
         let id = "usr_1234";
-        assert!(!VRC_ID_RE.is_match(id));
+        assert!(!is_valid_vrc_id(id));
     }
 
     #[test]
     fn test_validate_vrc_id_empty() {
-        assert!(!VRC_ID_RE.is_match(""));
+        assert!(!is_valid_vrc_id(""));
+    }
+
+    #[test]
+    fn test_validate_vrc_id_rejects_wrong_hyphen_positions() {
+        let id = "usr_123456781234-1234-1234-123456789abc";
+        assert!(!is_valid_vrc_id(id));
     }
 
     // ===== X ID validation =====
 
     #[test]
     fn test_validate_x_id_valid_alphanumeric() {
-        assert!(X_ID_RE.is_match("aqua_vrc"));
+        assert!(is_valid_x_id("aqua_vrc"));
     }
 
     #[test]
     fn test_validate_x_id_single_char() {
-        assert!(X_ID_RE.is_match("A"));
+        assert!(is_valid_x_id("A"));
     }
 
     #[test]
     fn test_validate_x_id_max_length() {
-        assert!(X_ID_RE.is_match("123456789012345")); // 15 chars
+        assert!(is_valid_x_id("123456789012345")); // 15 chars
     }
 
     #[test]
     fn test_validate_x_id_too_long() {
-        assert!(!X_ID_RE.is_match("1234567890123456")); // 16 chars
+        assert!(!is_valid_x_id("1234567890123456")); // 16 chars
     }
 
     #[test]
     fn test_validate_x_id_special_chars_rejected() {
-        assert!(!X_ID_RE.is_match("aqua@vrc"));
-        assert!(!X_ID_RE.is_match("aqua vrc"));
-        assert!(!X_ID_RE.is_match("aqua-vrc"));
+        assert!(!is_valid_x_id("aqua@vrc"));
+        assert!(!is_valid_x_id("aqua vrc"));
+        assert!(!is_valid_x_id("aqua-vrc"));
     }
 
     #[test]
     fn test_validate_x_id_empty_rejected() {
-        assert!(!X_ID_RE.is_match(""));
+        assert!(!is_valid_x_id(""));
+    }
+
+    #[test]
+    fn test_validate_x_id_rejects_non_ascii_characters() {
+        assert!(!is_valid_x_id("あqua"));
     }
 
     // ===== Bio length =====
@@ -663,21 +862,21 @@ mod proptests {
             e in "[0-9a-f]{12}",
         ) {
             let id = format!("usr_{a}-{b}-{c}-{d}-{e}");
-            prop_assert!(VRC_ID_RE.is_match(&id));
+            prop_assert!(is_valid_vrc_id(&id));
         }
 
         /// P2b: Random strings without the usr_ prefix are rejected.
         #[test]
         fn random_strings_rejected_as_vrc_id(input in "\\PC{0,100}") {
             if !input.starts_with("usr_") {
-                prop_assert!(!VRC_ID_RE.is_match(&input));
+                prop_assert!(!is_valid_vrc_id(&input));
             }
         }
 
         /// P3: Valid X IDs are accepted.
         #[test]
         fn valid_x_ids_accepted(id in "[a-zA-Z0-9_]{1,15}") {
-            prop_assert!(X_ID_RE.is_match(&id));
+            prop_assert!(is_valid_x_id(&id));
         }
 
         /// P3b: X IDs with special characters are rejected.
@@ -688,7 +887,7 @@ mod proptests {
             suffix in "[a-zA-Z0-9_]{0,7}",
         ) {
             let input = format!("{prefix}{bad_char}{suffix}");
-            prop_assert!(!X_ID_RE.is_match(&input));
+            prop_assert!(!is_valid_x_id(&input));
         }
     }
 }
