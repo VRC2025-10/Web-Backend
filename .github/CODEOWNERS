@@ -1,0 +1,30 @@
+# =============================================================================
+#  CODEOWNERS — VRC Web-Backend
+#  Defines code ownership for automatic PR review assignments.
+# =============================================================================
+
+# Default owner for everything
+* @Aqua-218
+
+# Core domain logic
+/vrc-backend/src/domain/ @Aqua-218
+
+# Security-sensitive code
+/vrc-backend/src/auth/ @Aqua-218
+/vrc-backend/src/adapters/inbound/middleware/ @Aqua-218
+/SECURITY.md @Aqua-218
+
+# Database migrations (require careful review)
+/vrc-backend/migrations/ @Aqua-218
+
+# CI/CD configuration
+/.github/workflows/ @Aqua-218
+/.github/actions/ @Aqua-218
+
+# Infrastructure
+/Dockerfile @Aqua-218
+/docker-compose*.yml @Aqua-218
+/Caddyfile @Aqua-218
+
+# Procedural macros
+/vrc-macros/ @Aqua-218
