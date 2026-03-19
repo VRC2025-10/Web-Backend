@@ -72,3 +72,99 @@ pub struct EventTag {
     pub name: String,
     pub color: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Duration, TimeZone};
+
+    use super::*;
+
+    fn sample_event(status: EventStatus, start_time: DateTime<Utc>, end_time: Option<DateTime<Utc>>) -> Event {
+        Event {
+            id: Uuid::nil(),
+            external_source_id: Some("external-id".to_owned()),
+            title: "Event".to_owned(),
+            description_markdown: String::new(),
+            description_html: String::new(),
+            host_user_id: None,
+            host_name: String::new(),
+            event_status: status,
+            start_time,
+            end_time,
+            location: None,
+            created_at: Utc.timestamp_opt(0, 0).single().expect("timestamp must be valid"),
+            updated_at: Utc.timestamp_opt(0, 0).single().expect("timestamp must be valid"),
+        }
+    }
+
+    // Spec refs: public-api.md event display_status contract.
+    // Coverage: all display state transitions derived from status and time windows.
+
+    #[test]
+    fn test_display_status_for_draft_event_is_draft() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().expect("timestamp must be valid");
+        let event = sample_event(EventStatus::Draft, now + Duration::hours(1), None);
+
+        assert!(matches!(event.display_status(now), DisplayStatus::Draft));
+    }
+
+    #[test]
+    fn test_display_status_for_cancelled_event_is_cancelled() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().expect("timestamp must be valid");
+        let event = sample_event(EventStatus::Cancelled, now - Duration::hours(1), None);
+
+        assert!(matches!(event.display_status(now), DisplayStatus::Cancelled));
+    }
+
+    #[test]
+    fn test_display_status_for_archived_event_is_archived() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().expect("timestamp must be valid");
+        let event = sample_event(EventStatus::Archived, now - Duration::hours(1), None);
+
+        assert!(matches!(event.display_status(now), DisplayStatus::Archived));
+    }
+
+    #[test]
+    fn test_display_status_for_published_future_event_is_upcoming() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().expect("timestamp must be valid");
+        let event = sample_event(
+            EventStatus::Published,
+            now + Duration::hours(2),
+            Some(now + Duration::hours(3)),
+        );
+
+        assert!(matches!(event.display_status(now), DisplayStatus::Upcoming));
+    }
+
+    #[test]
+    fn test_display_status_for_published_event_during_window_is_ongoing() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().expect("timestamp must be valid");
+        let event = sample_event(
+            EventStatus::Published,
+            now - Duration::minutes(30),
+            Some(now + Duration::minutes(30)),
+        );
+
+        assert!(matches!(event.display_status(now), DisplayStatus::Ongoing));
+    }
+
+    #[test]
+    fn test_display_status_for_published_event_after_end_is_ended() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().expect("timestamp must be valid");
+        let event = sample_event(
+            EventStatus::Published,
+            now - Duration::hours(2),
+            Some(now - Duration::minutes(1)),
+        );
+
+        assert!(matches!(event.display_status(now), DisplayStatus::Ended));
+    }
+
+    #[test]
+    fn test_display_status_for_published_event_without_end_time_is_ongoing_after_start() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().expect("timestamp must be valid");
+        let event = sample_event(EventStatus::Published, now - Duration::minutes(5), None);
+
+        assert!(matches!(event.display_status(now), DisplayStatus::Ongoing));
+    }
+}
