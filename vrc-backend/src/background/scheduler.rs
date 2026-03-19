@@ -9,11 +9,7 @@ const MAX_BACKOFF: Duration = Duration::from_secs(300);
 const INITIAL_BACKOFF: Duration = Duration::from_secs(5);
 
 /// Spawn background tasks that run on a periodic schedule.
-pub fn spawn(
-    pool: PgPool,
-    session_cleanup_interval_secs: u64,
-    event_archival_interval_secs: u64,
-) {
+pub fn spawn(pool: PgPool, session_cleanup_interval_secs: u64, event_archival_interval_secs: u64) {
     tokio::spawn(session_cleanup_loop(
         pool.clone(),
         session_cleanup_interval_secs,
