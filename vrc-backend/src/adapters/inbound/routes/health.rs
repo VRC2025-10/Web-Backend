@@ -19,6 +19,7 @@ struct HealthResponse {
     timestamp: chrono::DateTime<Utc>,
 }
 
+#[vrc_macros::handler(method = GET, path = "/health", summary = "Health check")]
 async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let db_ok = sqlx::query("SELECT 1")
         .fetch_one(&state.db_pool)
