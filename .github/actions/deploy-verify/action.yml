@@ -1,0 +1,170 @@
+# =============================================================================
+#  Composite Action: Post-Deploy Verification
+#  Progressive health check with exponential backoff, smoke tests,
+#  and structured output for rollback decisions.
+# =============================================================================
+name: "Post-Deploy Verification"
+description: "Verify deployment health with progressive checks and rollback detection"
+
+inputs:
+  host:
+    description: "Target host (e.g., production.example.com)"
+    required: true
+  port:
+    description: "Application port"
+    required: false
+    default: "3000"
+  health-path:
+    description: "Health check endpoint path"
+    required: false
+    default: "/health"
+  max-retries:
+    description: "Maximum retry attempts"
+    required: false
+    default: "12"
+  initial-delay:
+    description: "Initial delay in seconds before first check"
+    required: false
+    default: "5"
+  retry-interval:
+    description: "Base seconds between retries (doubled each attempt)"
+    required: false
+    default: "3"
+  ssh-user:
+    description: "SSH username for remote checks"
+    required: true
+  ssh-key:
+    description: "SSH private key"
+    required: true
+  expected-sha:
+    description: "Expected commit SHA in health response (optional)"
+    required: false
+    default: ""
+
+outputs:
+  healthy:
+    description: "Whether deployment is healthy (true/false)"
+    value: ${{ steps.verify.outputs.healthy }}
+  response-time-ms:
+    description: "Health check response time in milliseconds"
+    value: ${{ steps.verify.outputs.response_time_ms }}
+  attempts:
+    description: "Number of attempts before success"
+    value: ${{ steps.verify.outputs.attempts }}
+  health-response:
+    description: "Raw health check JSON response"
+    value: ${{ steps.verify.outputs.health_response }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Wait for initial startup
+      shell: bash
+      run: |
+        echo "Waiting ${{ inputs.initial-delay }}s for application startup..."
+        sleep "${{ inputs.initial-delay }}"
+
+    - name: Progressive health verification
+      id: verify
+      shell: bash
+      env:
+        SSH_KEY: ${{ inputs.ssh-key }}
+      run: |
+        set +e
+
+        MAX_RETRIES=${{ inputs.max-retries }}
+        RETRY_INTERVAL=${{ inputs.retry-interval }}
+        HEALTH_URL="http://localhost:${{ inputs.port }}${{ inputs.health-path }}"
+        HEALTHY="false"
+        ATTEMPTS=0
+        RESPONSE_TIME=0
+        HEALTH_RESPONSE=""
+
+        # Write SSH key to temp file
+        SSH_KEY_FILE=$(mktemp)
+        echo "${SSH_KEY}" > "${SSH_KEY_FILE}"
+        chmod 600 "${SSH_KEY_FILE}"
+        trap "shred -u ${SSH_KEY_FILE} 2>/dev/null || true" EXIT
+
+        for i in $(seq 1 "${MAX_RETRIES}"); do
+          ATTEMPTS=$i
+          echo "::group::Attempt ${i}/${MAX_RETRIES}"
+
+          # Measure response time
+          START_MS=$(date +%s%N)
+          RESPONSE=$(ssh -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=10 \
+            -o ServerAliveInterval=5 \
+            -i "${SSH_KEY_FILE}" \
+            "${{ inputs.ssh-user }}@${{ inputs.host }}" \
+            "curl -sf -w '\n%{http_code}\n%{time_total}' '${HEALTH_URL}'" 2>&1) || true
+          END_MS=$(date +%s%N)
+          RESPONSE_TIME=$(( (END_MS - START_MS) / 1000000 ))
+
+          HTTP_CODE=$(echo "${RESPONSE}" | tail -2 | head -1)
+          HEALTH_RESPONSE=$(echo "${RESPONSE}" | head -n -2)
+
+          echo "HTTP Status: ${HTTP_CODE}"
+          echo "Response Time: ${RESPONSE_TIME}ms"
+          echo "Response Body: ${HEALTH_RESPONSE}"
+
+          if [[ "${HTTP_CODE}" == "200" ]]; then
+            # Optionally verify commit SHA in response
+            if [[ -n "${{ inputs.expected-sha }}" ]]; then
+              if echo "${HEALTH_RESPONSE}" | grep -q "${{ inputs.expected-sha }}"; then
+                echo "✓ SHA verification passed"
+                HEALTHY="true"
+              else
+                echo "⚠ SHA mismatch — waiting for new version to be ready"
+              fi
+            else
+              HEALTHY="true"
+            fi
+
+            if [[ "${HEALTHY}" == "true" ]]; then
+              echo "::endgroup::"
+              echo "✓ Health check passed on attempt ${i}"
+              break
+            fi
+          else
+            echo "✗ Health check failed (HTTP ${HTTP_CODE})"
+          fi
+
+          echo "::endgroup::"
+
+          if (( i < MAX_RETRIES )); then
+            WAIT=$(( RETRY_INTERVAL * (2 ** (i - 1)) ))
+            # Cap backoff at 30 seconds
+            (( WAIT > 30 )) && WAIT=30
+            echo "Waiting ${WAIT}s before next attempt..."
+            sleep "${WAIT}"
+          fi
+        done
+
+        echo "healthy=${HEALTHY}" >> "$GITHUB_OUTPUT"
+        echo "response_time_ms=${RESPONSE_TIME}" >> "$GITHUB_OUTPUT"
+        echo "attempts=${ATTEMPTS}" >> "$GITHUB_OUTPUT"
+        echo "health_response=${HEALTH_RESPONSE}" >> "$GITHUB_OUTPUT"
+
+        if [[ "${HEALTHY}" != "true" ]]; then
+          echo "::error::Deployment health check failed after ${MAX_RETRIES} attempts"
+          exit 1
+        fi
+
+    - name: Smoke test — Docker container status
+      if: always()
+      shell: bash
+      env:
+        SSH_KEY: ${{ inputs.ssh-key }}
+      run: |
+        SSH_KEY_FILE=$(mktemp)
+        echo "${SSH_KEY}" > "${SSH_KEY_FILE}"
+        chmod 600 "${SSH_KEY_FILE}"
+        trap "shred -u ${SSH_KEY_FILE} 2>/dev/null || true" EXIT
+
+        echo "::group::Container Status"
+        ssh -o StrictHostKeyChecking=no \
+          -i "${SSH_KEY_FILE}" \
+          "${{ inputs.ssh-user }}@${{ inputs.host }}" \
+          "cd /opt/vrc-backend && docker compose -f docker-compose.prod.yml ps --format 'table {{.Name}}\t{{.Status}}\t{{.Ports}}'" || true
+        echo "::endgroup::"
