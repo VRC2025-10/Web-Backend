@@ -13,12 +13,15 @@ FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
 
 # Build dependencies only (cached unless Cargo.lock changes)
+# Use x86-64-v3 for broad AVX2 compatibility in modern cloud environments
+ENV RUSTFLAGS="-C target-cpu=x86-64-v3"
 RUN cargo chef cook --release --recipe-path recipe.json
 
 # Build application
 COPY . .
 ENV SQLX_OFFLINE=true
-RUN cargo build --release --bin vrc-backend
+RUN cargo build --release --bin vrc-backend && \
+    strip /app/target/release/vrc-backend
 
 # ============================================================
 # Stage 2: Runtime (minimal)
