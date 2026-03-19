@@ -12,7 +12,7 @@ use chrono::Utc;
 use hmac::{Hmac, Mac};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
 use crate::AppState;
@@ -291,9 +291,7 @@ async fn callback(
     rand::rng().fill_bytes(&mut raw_token);
     let token_b64 = URL_SAFE_NO_PAD.encode(raw_token);
 
-    let mut hasher = Sha256::new();
-    hasher.update(raw_token);
-    let token_hash = hasher.finalize().to_vec();
+    let token_hash = crate::auth::crypto::sha256_hash(&raw_token);
 
     // session_max_age_secs is at most ~604800 (7 days), well within f64 precision
     #[allow(clippy::cast_precision_loss)]

@@ -288,14 +288,11 @@ async fn logout(
 ) -> Result<impl IntoResponse, ApiError> {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use sha2::{Digest, Sha256};
 
     if let Some(cookie) = jar.get("session_id")
         && let Ok(token_bytes) = URL_SAFE_NO_PAD.decode(cookie.value())
     {
-        let mut hasher = Sha256::new();
-        hasher.update(&token_bytes);
-        let token_hash = hasher.finalize().to_vec();
+        let token_hash = crate::auth::crypto::sha256_hash(&token_bytes);
 
         if let Err(e) = sqlx::query!(
             "DELETE FROM sessions WHERE token_hash = $1",

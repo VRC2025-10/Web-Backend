@@ -4,7 +4,6 @@ use std::sync::Arc;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum_extra::extract::CookieJar;
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::AppState;
@@ -58,9 +57,7 @@ impl<R: Role> FromRequestParts<Arc<AppState>> for AuthenticatedUser<R> {
                 .map_err(|_| ApiError::SessionInvalid)?;
 
             // SHA-256 hash for lookup
-            let mut hasher = Sha256::new();
-            hasher.update(&token_bytes);
-            let token_hash = hasher.finalize().to_vec();
+            let token_hash = crate::auth::crypto::sha256_hash(&token_bytes);
 
             // Lookup session + user in a single query
             let row = sqlx::query_as!(
