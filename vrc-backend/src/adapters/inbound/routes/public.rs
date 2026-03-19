@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::routing::get;
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
@@ -9,6 +9,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::AppState;
+use crate::adapters::inbound::extractors::ValidatedQuery;
 use crate::domain::entities::event::EventStatus;
 use crate::domain::value_objects::pagination::{PageRequest, PageResponse};
 use crate::errors::api::ApiError;
@@ -28,7 +29,6 @@ struct PublicProfileSummary {
     nickname: Option<String>,
     vrc_id: Option<String>,
     x_id: Option<String>,
-    bio_summary: Option<String>,
     bio_html: Option<String>,
     avatar_url: Option<String>,
 }
@@ -143,7 +143,6 @@ struct MemberRow {
     nickname: Option<String>,
     vrc_id: Option<String>,
     x_id: Option<String>,
-    bio_markdown: Option<String>,
     bio_html: Option<String>,
     avatar_url: Option<String>,
 }
@@ -196,133 +195,21 @@ struct GalleryRow {
     created_at: DateTime<Utc>,
 }
 
-// ===== Helpers =====
-
-/// FR-PROF-006: Convert raw markdown to a plain-text summary of at most 120 characters.
-///
-/// Strips common markdown syntax (headings, bold, italic, links, images, code),
-/// normalises whitespace, and appends "..." when the result is truncated.
-fn truncate_bio(md: &str) -> String {
-    // Strip markdown syntax to approximate plain text
-    let mut plain = String::with_capacity(md.len());
-    let mut chars = md.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        match ch {
-            // Skip heading markers at start of line
-            '#' => {
-                while chars.peek() == Some(&'#') {
-                    chars.next();
-                }
-                // Skip optional space after heading markers
-                if chars.peek() == Some(&' ') {
-                    chars.next();
-                }
-            }
-            // Bold/italic markers and inline code backtick
-            '*' | '_' | '`' => {}
-            // Links: [text](url) → keep text
-            '[' => {
-                let mut depth = 1;
-                let mut link_text = String::new();
-                for c in chars.by_ref() {
-                    if c == '[' {
-                        depth += 1;
-                    }
-                    if c == ']' {
-                        depth -= 1;
-                        if depth == 0 {
-                            break;
-                        }
-                    }
-                    link_text.push(c);
-                }
-                // Skip the (url) portion if present
-                if chars.peek() == Some(&'(') {
-                    chars.next();
-                    let mut paren_depth = 1;
-                    for c in chars.by_ref() {
-                        if c == '(' {
-                            paren_depth += 1;
-                        }
-                        if c == ')' {
-                            paren_depth -= 1;
-                            if paren_depth == 0 {
-                                break;
-                            }
-                        }
-                    }
-                }
-                plain.push_str(&link_text);
-            }
-            // Images: ![alt](url) → skip entirely
-            '!' if chars.peek() == Some(&'[') => {
-                chars.next(); // skip '['
-                let mut depth = 1;
-                for c in chars.by_ref() {
-                    if c == '[' {
-                        depth += 1;
-                    }
-                    if c == ']' {
-                        depth -= 1;
-                        if depth == 0 {
-                            break;
-                        }
-                    }
-                }
-                if chars.peek() == Some(&'(') {
-                    chars.next();
-                    let mut p = 1;
-                    for c in chars.by_ref() {
-                        if c == '(' {
-                            p += 1;
-                        }
-                        if c == ')' {
-                            p -= 1;
-                            if p == 0 {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            // Collapse newlines and carriage returns into space
-            '\n' | '\r' => {
-                if !plain.ends_with(' ') {
-                    plain.push(' ');
-                }
-            }
-            _ => plain.push(ch),
-        }
-    }
-
-    // Normalise repeated whitespace
-    let normalised: String = plain.split_whitespace().collect::<Vec<_>>().join(" ");
-
-    if normalised.chars().count() <= 120 {
-        normalised
-    } else {
-        // Truncate at 120-char boundary (char-aware for multi-byte)
-        let truncated: String = normalised.chars().take(120).collect();
-        format!("{truncated}...")
-    }
-}
-
 // ===== Handlers =====
 
+#[vrc_macros::handler(method = GET, path = "/api/v1/public/members", summary = "List public members")]
 async fn list_members(
     State(state): State<Arc<AppState>>,
-    Query(page): Query<PageRequest>,
-) -> Result<Json<PageResponse<PublicMemberSummary>>, ApiError> {
-
+    ValidatedQuery(page): ValidatedQuery<PageRequest>,
+) -> Result<PageResponse<PublicMemberSummary>, ApiError> {
     let rows = sqlx::query_as!(
         MemberRow,
         r#"
         SELECT u.discord_id, u.discord_display_name, u.discord_avatar_hash,
                u.joined_at,
-               p.nickname, p.vrc_id, p.x_id, p.bio_markdown, p.bio_html, p.avatar_url
+               p.nickname, p.vrc_id, p.x_id, p.bio_html, p.avatar_url
         FROM users u
-        LEFT JOIN profiles p ON p.user_id = u.id AND p.is_public = true
+        JOIN profiles p ON p.user_id = u.id AND p.is_public = true
         WHERE u.status = 'active'
         ORDER BY u.joined_at DESC
         LIMIT $1 OFFSET $2
@@ -335,7 +222,12 @@ async fn list_members(
     .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     let count = sqlx::query_scalar!(
-        r#"SELECT COUNT(*) as "count!: i64" FROM users WHERE status = 'active'"#,
+        r#"
+        SELECT COUNT(*) as "count!: i64"
+        FROM users u
+        JOIN profiles p ON p.user_id = u.id AND p.is_public = true
+        WHERE u.status = 'active'
+        "#,
     )
     .fetch_one(&state.db_pool)
     .await
@@ -343,37 +235,25 @@ async fn list_members(
 
     let items: Vec<PublicMemberSummary> = rows
         .into_iter()
-        .map(|r| {
-            let has_profile = r.nickname.is_some()
-                || r.vrc_id.is_some()
-                || r.x_id.is_some()
-                || r.bio_html.is_some()
-                || r.avatar_url.is_some();
-
-            PublicMemberSummary {
-                user_id: r.discord_id,
-                discord_display_name: r.discord_display_name,
-                discord_avatar_hash: r.discord_avatar_hash,
-                joined_at: r.joined_at,
-                profile: if has_profile {
-                    Some(PublicProfileSummary {
-                        nickname: r.nickname,
-                        vrc_id: r.vrc_id,
-                        x_id: r.x_id,
-                        bio_summary: r.bio_markdown.as_deref().map(truncate_bio),
-                        bio_html: r.bio_html,
-                        avatar_url: r.avatar_url,
-                    })
-                } else {
-                    None
-                },
-            }
+        .map(|r| PublicMemberSummary {
+            user_id: r.discord_id,
+            discord_display_name: r.discord_display_name,
+            discord_avatar_hash: r.discord_avatar_hash,
+            joined_at: r.joined_at,
+            profile: Some(PublicProfileSummary {
+                nickname: r.nickname,
+                vrc_id: r.vrc_id,
+                x_id: r.x_id,
+                bio_html: r.bio_html,
+                avatar_url: r.avatar_url,
+            }),
         })
         .collect();
 
-    Ok(Json(PageResponse::new(items, count, page.per_page())))
+    Ok(PageResponse::new(items, count, page.per_page()))
 }
 
+#[vrc_macros::handler(method = GET, path = "/api/v1/public/members/{user_id}", summary = "Get public member")]
 async fn get_member(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<String>,
@@ -386,7 +266,7 @@ async fn get_member(
                p.nickname, p.vrc_id, p.x_id, p.bio_html, p.avatar_url,
                p.updated_at as profile_updated_at
         FROM users u
-        LEFT JOIN profiles p ON p.user_id = u.id AND p.is_public = true
+        JOIN profiles p ON p.user_id = u.id AND p.is_public = true
         WHERE u.discord_id = $1 AND u.status = 'active'
         "#,
         user_id
@@ -440,10 +320,11 @@ async fn get_member(
     }))
 }
 
+#[vrc_macros::handler(method = GET, path = "/api/v1/public/events", summary = "List public events")]
 async fn list_events(
     State(state): State<Arc<AppState>>,
-    Query(query): Query<EventListQuery>,
-) -> Result<Json<PageResponse<EventSummary>>, ApiError> {
+    ValidatedQuery(query): ValidatedQuery<EventListQuery>,
+) -> Result<PageResponse<EventSummary>, ApiError> {
     let now = Utc::now();
 
     // Public events only show published (or optionally filtered)
@@ -517,9 +398,10 @@ async fn list_events(
         })
         .collect();
 
-    Ok(Json(PageResponse::new(items, count, query.page.per_page())))
+    Ok(PageResponse::new(items, count, query.page.per_page()))
 }
 
+#[vrc_macros::handler(method = GET, path = "/api/v1/public/events/{event_id}", summary = "Get public event")]
 async fn get_event(
     State(state): State<Arc<AppState>>,
     Path(event_id): Path<Uuid>,
@@ -571,21 +453,23 @@ async fn get_event(
     }))
 }
 
+#[vrc_macros::handler(method = GET, path = "/api/v1/public/clubs", summary = "List public clubs")]
 async fn list_clubs(
     State(state): State<Arc<AppState>>,
-    Query(page): Query<PageRequest>,
-) -> Result<Json<PageResponse<ClubSummary>>, ApiError> {
-
+    ValidatedQuery(page): ValidatedQuery<PageRequest>,
+) -> Result<PageResponse<ClubSummary>, ApiError> {
     let rows = sqlx::query_as!(
         ClubListRow,
         r#"
         SELECT c.id, c.name, c.description_html,
                u.discord_id as owner_discord_id,
                u.discord_display_name as owner_display_name,
-               (SELECT COUNT(*) FROM club_members WHERE club_id = c.id) as "member_count!: i64",
+               COUNT(cm.user_id) as "member_count!: i64",
                c.created_at
         FROM clubs c
         JOIN users u ON u.id = c.owner_user_id
+        LEFT JOIN club_members cm ON cm.club_id = c.id
+        GROUP BY c.id, c.name, c.description_html, u.discord_id, u.discord_display_name, c.created_at
         ORDER BY c.name
         LIMIT $1 OFFSET $2
         "#,
@@ -616,9 +500,10 @@ async fn list_clubs(
         })
         .collect();
 
-    Ok(Json(PageResponse::new(items, count, page.per_page())))
+    Ok(PageResponse::new(items, count, page.per_page()))
 }
 
+#[vrc_macros::handler(method = GET, path = "/api/v1/public/clubs/{id}", summary = "Get public club")]
 async fn get_club(
     State(state): State<Arc<AppState>>,
     Path(club_id): Path<Uuid>,
@@ -677,12 +562,12 @@ async fn get_club(
     }))
 }
 
+#[vrc_macros::handler(method = GET, path = "/api/v1/public/clubs/{id}/gallery", summary = "List public gallery images")]
 async fn list_gallery(
     State(state): State<Arc<AppState>>,
     Path(club_id): Path<Uuid>,
-    Query(page): Query<PageRequest>,
-) -> Result<Json<PageResponse<GalleryImagePublic>>, ApiError> {
-
+    ValidatedQuery(page): ValidatedQuery<PageRequest>,
+) -> Result<PageResponse<GalleryImagePublic>, ApiError> {
     // Verify club exists
     let exists = sqlx::query_scalar!(
         r#"SELECT EXISTS(SELECT 1 FROM clubs WHERE id = $1) as "exists!: bool""#,
@@ -743,7 +628,7 @@ async fn list_gallery(
         })
         .collect();
 
-    Ok(Json(PageResponse::new(items, count, page.per_page())))
+    Ok(PageResponse::new(items, count, page.per_page()))
 }
 
 pub fn routes() -> Router<Arc<AppState>> {
