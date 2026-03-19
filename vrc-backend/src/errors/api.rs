@@ -84,12 +84,20 @@ impl IntoResponse for ApiError {
                 "CSRF検証に失敗しました",
                 None,
             ),
-            Self::InsufficientRole { .. } => (
-                StatusCode::FORBIDDEN,
-                "ERR-PERM-001",
-                "権限が不足しています",
-                None,
-            ),
+            Self::InsufficientRole { required, .. } => {
+                // ERR-PERM-001: requires staff+ but user has lower role
+                // ERR-PERM-002: requires admin+ but user has lower role
+                let code = match *required {
+                    "admin" | "super_admin" => "ERR-PERM-002",
+                    _ => "ERR-PERM-001",
+                };
+                (
+                    StatusCode::FORBIDDEN,
+                    code,
+                    "権限が不足しています",
+                    None,
+                )
+            }
             Self::AdminRoleEscalation => (
                 StatusCode::FORBIDDEN,
                 "ERR-ROLE-001",
