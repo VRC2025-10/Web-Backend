@@ -29,6 +29,7 @@ RUN cargo build --release --bin vrc-backend && \
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --gid 1000 app && \
@@ -42,6 +43,6 @@ WORKDIR /app
 EXPOSE 3000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD ["/usr/local/bin/vrc-backend", "healthcheck"]
+    CMD ["curl", "--fail", "--silent", "http://127.0.0.1:3000/health"]
 
 ENTRYPOINT ["/usr/local/bin/vrc-backend"]
