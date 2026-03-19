@@ -153,6 +153,20 @@ All configuration is via environment variables. See [`.env.example`](.env.exampl
 
 ## Documentation
 
+Full documentation is available in both English and Japanese:
+
+| | English | 日本語 |
+|---|---|---|
+| **Documentation Hub** | [docs/en/](docs/en/README.md) | [docs/ja/](docs/ja/README.md) |
+| Architecture | [Architecture](docs/en/architecture/README.md) | [アーキテクチャ](docs/ja/architecture/README.md) |
+| Getting Started | [Getting Started](docs/en/getting-started/README.md) | [はじめに](docs/ja/getting-started/README.md) |
+| API Reference | [Reference](docs/en/reference/README.md) | [リファレンス](docs/ja/reference/README.md) |
+| Guides | [Guides](docs/en/guides/README.md) | [ガイド](docs/ja/guides/README.md) |
+| Development | [Development](docs/en/development/README.md) | [開発](docs/ja/development/README.md) |
+| Design Decisions | [Design](docs/en/design/README.md) | [設計](docs/ja/design/README.md) |
+
+### Legacy / Quick Links
+
 - [Setup Guide](docs/setup.md) — environment variables, build instructions, auth configuration
 - [API Reference](docs/api/README.md) — full endpoint specifications with request/response examples
 - [System Specification](specs/README.md) — architecture, requirements, threat model, and more
