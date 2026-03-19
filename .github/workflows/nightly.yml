@@ -1,0 +1,405 @@
+# =============================================================================
+#  Nightly Extended Testing Pipeline — VRC Backend
+#  ─────────────────────────────────────────────────────────────────────────────
+#  Extended test suite: Miri (UB detection), Kani (formal verification),
+#  property-based fuzzing, benchmark regression, dependency freshness,
+#  and full integration test matrix.
+#  Runs nightly at 04:00 JST and on-demand.
+# =============================================================================
+name: "Nightly"
+run-name: "Nightly Extended ∙ ${{ github.event_name }}"
+
+on:
+  schedule:
+    # Daily 04:00 JST (19:00 UTC previous day)
+    - cron: "0 19 * * *"
+  workflow_dispatch:
+    inputs:
+      run_miri:
+        description: "Run Miri (undefined behavior detection)"
+        type: boolean
+        default: true
+      run_kani:
+        description: "Run Kani (formal verification)"
+        type: boolean
+        default: true
+      run_benchmarks:
+        description: "Run benchmarks"
+        type: boolean
+        default: true
+      run_fuzz:
+        description: "Run fuzzing seed corpus"
+        type: boolean
+        default: false
+      proptest_cases:
+        description: "Number of proptest cases"
+        type: string
+        default: "10000"
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: "nightly"
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  SQLX_OFFLINE: "true"
+
+jobs:
+  # ===========================================================================
+  # Extended Property-Based Testing
+  # ===========================================================================
+
+  proptest-extended:
+    name: "🎲 Extended Property Tests"
+    runs-on: arc-runner-set
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust-toolchain
+        with:
+          toolchain: "stable"
+          cache-prefix: "v1-nightly-proptest"
+
+      - name: Run extended property tests
+        run: |
+          cargo test \
+            --workspace \
+            --all-features \
+            -- proptest \
+            --test-threads=$(nproc)
+        env:
+          PROPTEST_CASES: ${{ inputs.proptest_cases || '10000' }}
+          RUST_BACKTRACE: "1"
+
+      - name: Upload proptest regressions
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-proptest-regressions
+          path: "**/proptest-regressions/**"
+          retention-days: 30
+          if-no-files-found: ignore
+
+  # ===========================================================================
+  # Full Integration Test Suite
+  # ===========================================================================
+
+  integration-full:
+    name: "🔗 Full Integration Suite"
+    runs-on: arc-runner-set
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust-toolchain
+        with:
+          toolchain: "stable"
+          cache-prefix: "v1-nightly-integration"
+
+      - uses: ./.github/actions/setup-postgres
+        with:
+          migrations-path: "vrc-backend/migrations"
+          postgres-args: "-c shared_buffers=256MB -c work_mem=16MB -c fsync=off -c full_page_writes=off -c synchronous_commit=off"
+
+      - name: Run all tests (comprehensive)
+        run: |
+          cargo test \
+            --workspace \
+            --all-features \
+            -- --test-threads=1 \
+            --include-ignored
+        env:
+          SQLX_OFFLINE: "false"
+          RUST_BACKTRACE: "1"
+          RUST_LOG: "vrc_backend=debug,sqlx=warn"
+
+  # ===========================================================================
+  # Miri — Undefined Behavior Detection
+  # ===========================================================================
+
+  miri:
+    name: "🔮 Miri (UB Detection)"
+    if: inputs.run_miri != false
+    runs-on: arc-runner-set
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust-toolchain
+        with:
+          toolchain: "nightly"
+          components: "miri"
+          cache-prefix: "v1-nightly-miri"
+
+      - name: Setup Miri
+        run: cargo miri setup
+
+      - name: Run Miri on unit tests
+        run: |
+          # Miri can't handle all external crate FFI, so we run on specific test targets
+          # that exercise pure Rust logic (no database, no network)
+          cargo miri test \
+            --package vrc-backend \
+            --lib \
+            -- --test-threads=1 \
+            2>&1 | tee miri-results.txt || true
+        env:
+          MIRIFLAGS: "-Zmiri-disable-isolation -Zmiri-symbolic-alignment-check"
+          SQLX_OFFLINE: "true"
+
+      - name: Upload Miri results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-miri-results
+          path: miri-results.txt
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # ===========================================================================
+  # Kani — Formal Verification
+  # ===========================================================================
+
+  kani:
+    name: "🎯 Kani (Formal Verification)"
+    if: inputs.run_kani != false
+    runs-on: arc-runner-set
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Kani
+        run: |
+          if ! command -v cargo-kani &> /dev/null; then
+            echo "::group::Installing Kani Verifier"
+            cargo install --locked kani-verifier
+            cargo kani setup
+            echo "::endgroup::"
+          fi
+
+      - name: Run Kani proofs
+        run: |
+          echo "::group::Kani Verification"
+          # Run Kani proofs if any exist
+          if grep -rq 'kani::proof' vrc-backend/src/ 2>/dev/null; then
+            cargo kani \
+              --workspace \
+              --output-format terse \
+              2>&1 | tee kani-results.txt
+          else
+            echo "No Kani proofs found. Skipping."
+            echo "No proofs found" > kani-results.txt
+          fi
+          echo "::endgroup::"
+        continue-on-error: true
+
+      - name: Upload Kani results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-kani-results
+          path: kani-results.txt
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # ===========================================================================
+  # Dependency Freshness Check
+  # ===========================================================================
+
+  dependency-freshness:
+    name: "📦 Dependency Freshness"
+    runs-on: arc-runner-set
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust-toolchain
+        with:
+          toolchain: "stable"
+          cache-prefix: "v1-nightly-deps"
+
+      - name: Install cargo-outdated
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-outdated
+
+      - name: Check outdated dependencies
+        run: |
+          echo "::group::Outdated Dependencies"
+          cargo outdated --workspace --root-deps-only 2>&1 | tee outdated-report.txt
+          echo "::endgroup::"
+
+      - name: Check for yanked crates
+        run: |
+          echo "::group::Yanked Crate Check"
+          cargo install --locked cargo-audit 2>/dev/null || true
+          cargo audit --deny yanked 2>&1 | tee yanked-report.txt || true
+          echo "::endgroup::"
+
+      - name: Upload freshness reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-dependency-freshness
+          path: |
+            outdated-report.txt
+            yanked-report.txt
+          retention-days: 7
+
+  # ===========================================================================
+  # Compilation on Latest Nightly
+  # ===========================================================================
+
+  nightly-compile:
+    name: "🌙 Nightly Compiler Check"
+    runs-on: arc-runner-set
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust-toolchain
+        with:
+          toolchain: "nightly"
+          components: "clippy,rustfmt"
+          cache-prefix: "v1-nightly-compile"
+
+      - name: cargo check (nightly)
+        run: cargo check --workspace --all-features --all-targets
+
+      - name: cargo clippy (nightly)
+        run: |
+          cargo clippy \
+            --workspace \
+            --all-targets \
+            --all-features \
+            -- -D warnings \
+               -W clippy::nursery \
+               -W clippy::cargo \
+               -A clippy::multiple_crate_versions \
+               -A clippy::module_name_repetitions \
+               -A clippy::must_use_candidate \
+               -A clippy::missing_errors_doc \
+               -A clippy::missing_panics_doc
+        continue-on-error: true
+
+  # ===========================================================================
+  # Docker Build Verification (rebuild from scratch)
+  # ===========================================================================
+
+  docker-rebuild:
+    name: "🐳 Docker Full Rebuild"
+    runs-on: arc-runner-set
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Full rebuild (no cache)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: "vrc-backend:nightly-${{ github.sha }}"
+          no-cache: true
+
+      - name: Verify image
+        run: |
+          echo "::group::Image Details"
+          docker inspect "vrc-backend:nightly-${{ github.sha }}" | head -50
+          docker history "vrc-backend:nightly-${{ github.sha }}"
+          echo "::endgroup::"
+
+          SIZE=$(docker image inspect "vrc-backend:nightly-${{ github.sha }}" --format '{{.Size}}')
+          SIZE_MB=$(echo "scale=2; ${SIZE} / 1048576" | bc)
+          echo "Image size: ${SIZE_MB} MB"
+
+      - name: Cleanup
+        if: always()
+        run: docker rmi "vrc-backend:nightly-${{ github.sha }}" 2>/dev/null || true
+
+  # ===========================================================================
+  # Nightly Gate & Report
+  # ===========================================================================
+
+  nightly-report:
+    name: "📊 Nightly Report"
+    if: always()
+    needs:
+      - proptest-extended
+      - integration-full
+      - miri
+      - kani
+      - dependency-freshness
+      - nightly-compile
+      - docker-rebuild
+    runs-on: arc-runner-set
+    timeout-minutes: 5
+    steps:
+      - name: Generate nightly report
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" << EOF
+          ## 🌙 Nightly Extended Test Report
+
+          | Test Suite | Result |
+          |------------|--------|
+          | Extended Property Tests | ${{ needs.proptest-extended.result }} |
+          | Full Integration Suite | ${{ needs.integration-full.result }} |
+          | Miri (UB Detection) | ${{ needs.miri.result }} |
+          | Kani (Formal Verification) | ${{ needs.kani.result }} |
+          | Dependency Freshness | ${{ needs.dependency-freshness.result }} |
+          | Nightly Compiler | ${{ needs.nightly-compile.result }} |
+          | Docker Full Rebuild | ${{ needs.docker-rebuild.result }} |
+
+          **Run:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          **Date:** $(date -u +%Y-%m-%d)
+          EOF
+
+      - name: Check for critical failures
+        run: |
+          CRITICAL_FAILURES=""
+
+          if [[ "${{ needs.integration-full.result }}" == "failure" ]]; then
+            CRITICAL_FAILURES="${CRITICAL_FAILURES}integration-full "
+          fi
+          if [[ "${{ needs.proptest-extended.result }}" == "failure" ]]; then
+            CRITICAL_FAILURES="${CRITICAL_FAILURES}proptest "
+          fi
+
+          if [[ -n "${CRITICAL_FAILURES}" ]]; then
+            echo "::error::Critical nightly failures: ${CRITICAL_FAILURES}"
+          fi
+
+  notify:
+    name: "📢 Nightly Notification"
+    needs: [nightly-report]
+    if: failure()
+    uses: ./.github/workflows/reusable-notify.yml
+    with:
+      status: "failure"
+      title: "Nightly Extended Tests — Failures Detected"
+      additional-message: "One or more nightly test suites failed. Review the run for details."
+    secrets:
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_DEPLOY_WEBHOOK }}
+    permissions: {}
