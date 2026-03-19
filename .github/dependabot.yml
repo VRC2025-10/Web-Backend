@@ -1,0 +1,94 @@
+# =============================================================================
+#  Dependabot Configuration
+#  Auto-updates for Rust dependencies and GitHub Actions
+# =============================================================================
+version: 2
+
+registries:
+  crates-io:
+    type: "rust-crate"
+    url: "https://crates.io"
+
+updates:
+  # ── Rust dependencies (Cargo) ────────────────────────────────────────────
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "03:00"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "Aqua-218"
+    labels:
+      - "dependencies"
+      - "rust"
+    commit-message:
+      prefix: "deps(cargo)"
+    ignore:
+      # Avoid major version bumps without manual review
+      - dependency-name: "axum"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "sqlx"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "tokio"
+        update-types: ["version-update:semver-major"]
+    groups:
+      # Group minor/patch updates for related crates
+      web-framework:
+        patterns:
+          - "axum*"
+          - "tower*"
+          - "hyper"
+      database:
+        patterns:
+          - "sqlx*"
+      crypto:
+        patterns:
+          - "hmac"
+          - "sha2"
+          - "subtle"
+          - "rand"
+      observability:
+        patterns:
+          - "tracing*"
+          - "metrics*"
+
+  # ── GitHub Actions ───────────────────────────────────────────────────────
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "03:00"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 5
+    reviewers:
+      - "Aqua-218"
+    labels:
+      - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "ci(deps)"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  # ── Docker base images ──────────────────────────────────────────────────
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "03:00"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 3
+    reviewers:
+      - "Aqua-218"
+    labels:
+      - "dependencies"
+      - "docker"
+    commit-message:
+      prefix: "deps(docker)"
