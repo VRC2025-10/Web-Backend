@@ -1,0 +1,52 @@
+// =============================================================================
+//  Dev Container — VRC Web-Backend
+//  One-click development environment via VS Code / GitHub Codespaces.
+// =============================================================================
+{
+  "name": "VRC Web-Backend",
+  "dockerComposeFile": [
+    "../docker-compose.yml",
+    "docker-compose.devcontainer.yml"
+  ],
+  "service": "dev",
+  "workspaceFolder": "/workspace",
+
+  "features": {
+    "ghcr.io/devcontainers/features/rust:1": {
+      "version": "1.85",
+      "profile": "default"
+    },
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "serayuzgur.crates",
+        "vadimcn.vscode-lldb",
+        "EditorConfig.EditorConfig",
+        "GitHub.copilot"
+      ],
+      "settings": {
+        "editor.formatOnSave": true,
+        "rust-analyzer.check.command": "clippy",
+        "rust-analyzer.cargo.features": "all",
+        "[rust]": {
+          "editor.defaultFormatter": "rust-lang.rust-analyzer"
+        }
+      }
+    }
+  },
+
+  "forwardPorts": [8080, 5432],
+  "portsAttributes": {
+    "8080": { "label": "Backend API", "onAutoForward": "notify" },
+    "5432": { "label": "PostgreSQL", "onAutoForward": "silent" }
+  },
+
+  "postCreateCommand": "cp -n .env.example .env 2>/dev/null; cargo build",
+  "postStartCommand": "docker compose up -d",
+  "remoteUser": "vscode"
+}
