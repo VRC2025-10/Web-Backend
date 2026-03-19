@@ -1,3 +1,14 @@
 [workspace]
 members = ["vrc-backend", "vrc-macros"]
 resolver = "3"
+
+# Maximum performance release profile
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+[profile.release.build-override]
+opt-level = 3
