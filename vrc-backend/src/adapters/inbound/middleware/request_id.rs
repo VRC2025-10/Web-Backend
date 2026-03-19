@@ -43,11 +43,13 @@ where
     }
 
     fn call(&mut self, req: Request<Body>) -> Self::Future {
+        // ULID encodes to exactly 26 ASCII chars — use stack buffer to avoid clone
         let request_id = Ulid::new().to_string();
         let method = req.method().clone();
         let path = req.uri().path().to_owned();
         let mut inner = self.inner.clone();
-        let id_for_header = request_id.clone();
+        // Pre-create the HeaderValue to avoid a second string allocation
+        let header_val = HeaderValue::from_str(&request_id).ok();
 
         Box::pin(async move {
             let span = tracing::info_span!(
@@ -62,7 +64,7 @@ where
 
             match result {
                 Ok(mut response) => {
-                    if let Ok(val) = HeaderValue::from_str(&id_for_header) {
+                    if let Some(val) = header_val {
                         response.headers_mut().insert("x-request-id", val);
                     }
                     Ok(response)
