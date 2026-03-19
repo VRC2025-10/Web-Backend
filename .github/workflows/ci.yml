@@ -49,7 +49,7 @@ permissions:
 # ── Concurrency ────────────────────────────────────────────────────────────
 concurrency:
   group: "ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}"
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 # ── Global environment ─────────────────────────────────────────────────────
 env:
@@ -263,12 +263,11 @@ jobs:
 
   clippy-stable:
     name: "Clippy (stable)"
-    needs: [changes, check-lockfile, format]
+    needs: [changes, check-lockfile]
     if: |
       always() &&
       needs.changes.outputs.any_src == 'true' &&
-      (needs.check-lockfile.result == 'success' || needs.check-lockfile.result == 'skipped') &&
-      (needs.format.result == 'success' || needs.format.result == 'skipped')
+      (needs.check-lockfile.result == 'success' || needs.check-lockfile.result == 'skipped')
     runs-on: arc-runner-set
     timeout-minutes: 20
     steps:
@@ -409,11 +408,11 @@ jobs:
 
   test-unit:
     name: "Unit Tests"
-    needs: [changes, clippy-stable]
+    needs: [changes, check-lockfile]
     if: |
       always() &&
       needs.changes.outputs.any_src == 'true' &&
-      needs.clippy-stable.result == 'success'
+      (needs.check-lockfile.result == 'success' || needs.check-lockfile.result == 'skipped')
     runs-on: arc-runner-set
     timeout-minutes: 20
     steps:
@@ -438,11 +437,11 @@ jobs:
 
   test-contract:
     name: "Contract Tests"
-    needs: [changes, clippy-stable]
+    needs: [changes, check-lockfile]
     if: |
       always() &&
       needs.changes.outputs.any_src == 'true' &&
-      needs.clippy-stable.result == 'success'
+      (needs.check-lockfile.result == 'success' || needs.check-lockfile.result == 'skipped')
     runs-on: arc-runner-set
     timeout-minutes: 20
     steps:
@@ -472,11 +471,11 @@ jobs:
 
   test-integration:
     name: "Integration Tests"
-    needs: [changes, clippy-stable]
+    needs: [changes, check-lockfile]
     if: |
       always() &&
       (needs.changes.outputs.rust == 'true' || needs.changes.outputs.migrations == 'true') &&
-      needs.clippy-stable.result == 'success'
+      (needs.check-lockfile.result == 'success' || needs.check-lockfile.result == 'skipped')
     runs-on: arc-runner-set
     timeout-minutes: 25
     steps:
@@ -518,11 +517,11 @@ jobs:
 
   test-property:
     name: "Property Tests"
-    needs: [changes, metadata, clippy-stable]
+    needs: [changes, metadata, check-lockfile]
     if: |
       always() &&
       needs.changes.outputs.any_src == 'true' &&
-      needs.clippy-stable.result == 'success' &&
+      (needs.check-lockfile.result == 'success' || needs.check-lockfile.result == 'skipped') &&
       (needs.metadata.outputs.run_extended == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: arc-runner-set
     timeout-minutes: 30
@@ -558,11 +557,11 @@ jobs:
 
   coverage:
     name: "Code Coverage"
-    needs: [changes, metadata, clippy-stable]
+    needs: [changes, metadata, check-lockfile]
     if: |
       always() &&
       needs.changes.outputs.any_src == 'true' &&
-      needs.clippy-stable.result == 'success' &&
+      (needs.check-lockfile.result == 'success' || needs.check-lockfile.result == 'skipped') &&
       needs.metadata.outputs.run_extended == 'true'
     runs-on: arc-runner-set
     timeout-minutes: 30
@@ -705,11 +704,11 @@ jobs:
 
   build-release:
     name: "Release Build"
-    needs: [changes, clippy-stable, test-unit]
+    needs: [changes, check-lockfile, test-unit]
     if: |
       always() &&
       needs.changes.outputs.any_src == 'true' &&
-      needs.clippy-stable.result == 'success' &&
+      (needs.check-lockfile.result == 'success' || needs.check-lockfile.result == 'skipped') &&
       needs.test-unit.result == 'success'
     runs-on: arc-runner-set
     timeout-minutes: 30
@@ -756,12 +755,12 @@ jobs:
 
   build-docker:
     name: "Docker Build"
-    needs: [changes, metadata, clippy-stable, test-unit]
+    needs: [changes, metadata, check-lockfile, test-unit]
     if: |
       always() &&
       (needs.changes.outputs.docker == 'true' || needs.changes.outputs.rust == 'true' ||
        needs.metadata.outputs.should_deploy == 'true' || inputs.force_docker_build == true) &&
-      needs.clippy-stable.result == 'success' &&
+      (needs.check-lockfile.result == 'success' || needs.check-lockfile.result == 'skipped') &&
       needs.test-unit.result == 'success'
     uses: ./.github/workflows/reusable-docker-publish.yml
     with:

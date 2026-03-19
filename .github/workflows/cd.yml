@@ -76,7 +76,7 @@ permissions:
 
 concurrency:
   group: "deploy-${{ inputs.environment }}"
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 env:
   REGISTRY: ghcr.io
