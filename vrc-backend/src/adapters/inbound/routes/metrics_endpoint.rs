@@ -10,6 +10,8 @@ use subtle::ConstantTimeEq;
 
 use crate::AppState;
 
+use secrecy::ExposeSecret;
+
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new().route("/metrics", get(metrics_handler))
 }
@@ -19,6 +21,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 /// Protected by the system API token (Bearer authentication) with SHA-256
 /// hashing + constant-time comparison (NFR-SEC-004) to prevent timing attacks
 /// and information disclosure of request patterns, paths, and status codes.
+#[vrc_macros::handler(method = GET, path = "/metrics", summary = "Prometheus metrics")]
 async fn metrics_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -30,7 +33,7 @@ async fn metrics_handler(
         .and_then(|v| v.strip_prefix("Bearer "))
         .is_some_and(|token| {
             let token_hash = Sha256::digest(token.as_bytes());
-            let expected_hash = Sha256::digest(state.config.system_api_token.as_bytes());
+            let expected_hash = Sha256::digest(state.config.system_api_token.expose_secret().as_bytes());
             token_hash.ct_eq(&expected_hash).into()
         });
 
