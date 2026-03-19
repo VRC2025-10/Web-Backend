@@ -1,3 +1,5 @@
+use axum::http::HeaderValue;
+use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// Raw wire format used only during deserialization.
@@ -17,7 +19,8 @@ fn default_per_page() -> u32 {
 }
 
 /// Pagination parameters that are guaranteed valid after deserialization.
-/// `page >= 1` and `1 <= per_page <= 100` — enforced at construction time.
+/// `page >= 1` and `1 <= per_page <= 100` — enforced at deserialization time.
+/// Invalid values return `400 ERR-VALIDATION` per spec.
 #[derive(Debug, Clone)]
 pub struct PageRequest {
     page: u32,
@@ -27,19 +30,22 @@ pub struct PageRequest {
 impl<'de> Deserialize<'de> for PageRequest {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = RawPageRequest::deserialize(deserializer)?;
-        Ok(Self::new(raw.page, raw.per_page))
+        if raw.page == 0 {
+            return Err(serde::de::Error::custom("page must be >= 1"));
+        }
+        if raw.per_page == 0 || raw.per_page > 100 {
+            return Err(serde::de::Error::custom(
+                "per_page must be between 1 and 100",
+            ));
+        }
+        Ok(Self {
+            page: raw.page,
+            per_page: raw.per_page,
+        })
     }
 }
 
 impl PageRequest {
-    /// Create a valid `PageRequest`, clamping out-of-range values.
-    pub fn new(page: u32, per_page: u32) -> Self {
-        Self {
-            page: if page == 0 { 1 } else { page },
-            per_page: per_page.clamp(1, 100),
-        }
-    }
-
     pub fn page(&self) -> u32 {
         self.page
     }
@@ -88,43 +94,78 @@ impl<T: Serialize> PageResponse<T> {
     }
 }
 
+/// Implement `IntoResponse` for `PageResponse` to include pagination headers.
+/// Returns `X-Total-Count` and `X-Total-Pages` headers alongside the JSON body.
+impl<T: Serialize> IntoResponse for PageResponse<T> {
+    fn into_response(self) -> Response {
+        let total_count = self.total_count;
+        let total_pages = self.total_pages;
+        let mut response = axum::Json(self).into_response();
+
+        let headers = response.headers_mut();
+        let mut buf = itoa::Buffer::new();
+        if let Ok(v) = HeaderValue::from_str(buf.format(total_count)) {
+            headers.insert("x-total-count", v);
+        }
+        let mut buf2 = itoa::Buffer::new();
+        if let Ok(v) = HeaderValue::from_str(buf2.format(total_pages)) {
+            headers.insert("x-total-pages", v);
+        }
+
+        response
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // Spec refs: pagination.md request parameter constraints and response headers.
+    // Coverage: deserialization boundaries, page math, and response header contract.
+
     #[test]
-    fn test_new_clamps_page_zero_to_one() {
-        let req = PageRequest::new(0, 20);
-        assert_eq!(req.page(), 1);
+    fn test_deserialize_rejects_page_zero() {
+        let result: Result<PageRequest, _> =
+            serde_urlencoded::from_str("page=0&per_page=20");
+        assert!(result.is_err());
     }
 
     #[test]
-    fn test_new_clamps_per_page_above_100() {
-        let req = PageRequest::new(1, 200);
-        assert_eq!(req.per_page(), 100);
+    fn test_deserialize_rejects_per_page_zero() {
+        let result: Result<PageRequest, _> =
+            serde_urlencoded::from_str("page=1&per_page=0");
+        assert!(result.is_err());
     }
 
     #[test]
-    fn test_new_clamps_per_page_zero_to_one() {
-        let req = PageRequest::new(1, 0);
-        assert_eq!(req.per_page(), 1);
+    fn test_deserialize_rejects_per_page_above_100() {
+        let result: Result<PageRequest, _> =
+            serde_urlencoded::from_str("page=1&per_page=200");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_deserialize_accepts_valid_defaults() {
+        let result: PageRequest = serde_urlencoded::from_str("").unwrap();
+        assert_eq!(result.page(), 1);
+        assert_eq!(result.per_page(), 20);
     }
 
     #[test]
     fn test_offset_first_page() {
-        let req = PageRequest::new(1, 20);
+        let req: PageRequest = serde_urlencoded::from_str("page=1&per_page=20").unwrap();
         assert_eq!(req.offset(), 0);
     }
 
     #[test]
     fn test_offset_second_page() {
-        let req = PageRequest::new(2, 20);
+        let req: PageRequest = serde_urlencoded::from_str("page=2&per_page=20").unwrap();
         assert_eq!(req.offset(), 20);
     }
 
     #[test]
     fn test_offset_large_page() {
-        let req = PageRequest::new(100, 50);
+        let req: PageRequest = serde_urlencoded::from_str("page=100&per_page=50").unwrap();
         assert_eq!(req.offset(), 4950);
     }
 
@@ -156,6 +197,35 @@ mod tests {
     fn test_total_pages_single_item() {
         let resp: PageResponse<String> = PageResponse::new(vec![], 1, 20);
         assert_eq!(resp.total_pages, 1);
+    }
+
+    #[tokio::test]
+    async fn test_page_response_into_response_sets_pagination_headers() {
+        let response = PageResponse::new(vec!["item".to_owned()], 21, 20).into_response();
+
+        assert_eq!(
+            response
+                .headers()
+                .get("x-total-count")
+                .and_then(|value| value.to_str().ok()),
+            Some("21")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-total-pages")
+                .and_then(|value| value.to_str().ok()),
+            Some("2")
+        );
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body must be readable");
+        let json: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("response body must be valid json");
+        assert_eq!(json["total_count"], 21);
+        assert_eq!(json["total_pages"], 2);
+        assert_eq!(json["items"][0], "item");
     }
 }
 
