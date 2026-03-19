@@ -1,0 +1,12 @@
+# Dev container service — extends docker-compose.yml (PostgreSQL)
+services:
+  dev:
+    image: mcr.microsoft.com/devcontainers/base:bookworm
+    volumes:
+      - ..:/workspace:cached
+    command: sleep infinity
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://vrc:vrc_dev_password@postgres:5432/vrc_backend
