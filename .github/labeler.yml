@@ -1,0 +1,58 @@
+# =============================================================================
+#  PR Auto-Labeler — VRC Web-Backend
+#  Labels pull requests based on changed file paths.
+# =============================================================================
+
+rust:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "vrc-backend/src/**"
+      - "vrc-macros/src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+
+database:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "vrc-backend/migrations/**"
+      - ".sqlx/**"
+
+docker:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "Dockerfile"
+      - "docker-compose*.yml"
+      - ".dockerignore"
+      - "Caddyfile"
+
+ci:
+  - changed-files:
+    - any-glob-to-any-file:
+      - ".github/**"
+
+documentation:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "docs/**"
+      - "specs/**"
+      - "*.md"
+
+dependencies:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "vrc-backend/Cargo.toml"
+      - "vrc-macros/Cargo.toml"
+
+tests:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "vrc-backend/tests/**"
+
+security:
+  - changed-files:
+    - any-glob-to-any-file:
+      - "vrc-backend/src/auth/**"
+      - "vrc-backend/src/adapters/inbound/middleware/**"
+      - "SECURITY.md"
