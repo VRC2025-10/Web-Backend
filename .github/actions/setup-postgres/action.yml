@@ -1,0 +1,146 @@
+# =============================================================================
+#  Composite Action: Setup PostgreSQL
+#  Starts PostgreSQL via Docker (compatible with all ARC container modes)
+#  and runs SQLx migrations. Does NOT rely on GitHub service containers.
+# =============================================================================
+name: "Setup PostgreSQL"
+description: "Start PostgreSQL container and run SQLx migrations for testing"
+
+inputs:
+  postgres-version:
+    description: "PostgreSQL major version"
+    required: false
+    default: "16"
+  database-name:
+    description: "Database name to create"
+    required: false
+    default: "vrc_class_reunion_test"
+  database-user:
+    description: "Database superuser name"
+    required: false
+    default: "vrc_app"
+  database-password:
+    description: "Database password"
+    required: false
+    default: "test_password_ci_ephemeral"
+  database-port:
+    description: "Host port to bind PostgreSQL"
+    required: false
+    default: "5432"
+  migrations-path:
+    description: "Path to SQLx migrations directory"
+    required: false
+    default: "vrc-backend/migrations"
+  run-migrations:
+    description: "Whether to run SQLx migrations"
+    required: false
+    default: "true"
+  wait-timeout:
+    description: "Seconds to wait for PostgreSQL readiness"
+    required: false
+    default: "60"
+  postgres-args:
+    description: "Additional PostgreSQL server arguments"
+    required: false
+    default: "-c shared_buffers=128MB -c work_mem=4MB -c fsync=off -c full_page_writes=off -c synchronous_commit=off"
+
+outputs:
+  database-url:
+    description: "Full database connection URL"
+    value: ${{ steps.start.outputs.database_url }}
+  container-id:
+    description: "Docker container ID (for cleanup)"
+    value: ${{ steps.start.outputs.container_id }}
+  container-name:
+    description: "Docker container name"
+    value: ${{ steps.start.outputs.container_name }}
+
+runs:
+  using: "composite"
+  steps:
+    # ── Start PostgreSQL container ─────────────────────────────────────────
+    - name: Start PostgreSQL ${{ inputs.postgres-version }}
+      id: start
+      shell: bash
+      run: |
+        CONTAINER_NAME="pg-ci-${{ github.run_id }}-${{ github.run_attempt }}"
+
+        echo "::group::Starting PostgreSQL ${CONTAINER_NAME}"
+        CONTAINER_ID=$(docker run -d \
+          --name "${CONTAINER_NAME}" \
+          -e POSTGRES_DB="${{ inputs.database-name }}" \
+          -e POSTGRES_USER="${{ inputs.database-user }}" \
+          -e POSTGRES_PASSWORD="${{ inputs.database-password }}" \
+          -e POSTGRES_HOST_AUTH_METHOD=scram-sha-256 \
+          -e POSTGRES_INITDB_ARGS="--auth-host=scram-sha-256" \
+          -p "${{ inputs.database-port }}:5432" \
+          --tmpfs /var/lib/postgresql/data:rw,noexec,nosuid,size=512m \
+          --health-cmd "pg_isready -U ${{ inputs.database-user }} -d ${{ inputs.database-name }}" \
+          --health-interval 2s \
+          --health-timeout 3s \
+          --health-retries 30 \
+          "postgres:${{ inputs.postgres-version }}-alpine" \
+          postgres ${{ inputs.postgres-args }})
+
+        echo "container_id=${CONTAINER_ID}" >> "$GITHUB_OUTPUT"
+        echo "container_name=${CONTAINER_NAME}" >> "$GITHUB_OUTPUT"
+
+        DATABASE_URL="postgres://${{ inputs.database-user }}:${{ inputs.database-password }}@localhost:${{ inputs.database-port }}/${{ inputs.database-name }}"
+        echo "database_url=${DATABASE_URL}" >> "$GITHUB_OUTPUT"
+        echo "DATABASE_URL=${DATABASE_URL}" >> "$GITHUB_ENV"
+        echo "::endgroup::"
+
+    # ── Wait for readiness ─────────────────────────────────────────────────
+    - name: Wait for PostgreSQL readiness
+      shell: bash
+      run: |
+        TIMEOUT=${{ inputs.wait-timeout }}
+        CONTAINER="${{ steps.start.outputs.container_name }}"
+        echo "Waiting up to ${TIMEOUT}s for PostgreSQL..."
+
+        SECONDS=0
+        until docker exec "${CONTAINER}" pg_isready -U "${{ inputs.database-user }}" -d "${{ inputs.database-name }}" > /dev/null 2>&1; do
+          if (( SECONDS >= TIMEOUT )); then
+            echo "::error::PostgreSQL failed to become ready within ${TIMEOUT}s"
+            echo "::group::Container Logs"
+            docker logs "${CONTAINER}" 2>&1 | tail -50
+            echo "::endgroup::"
+            exit 1
+          fi
+          sleep 1
+        done
+
+        echo "✓ PostgreSQL ready in ${SECONDS}s"
+
+        # Verify connection with psql
+        docker exec "${CONTAINER}" psql -U "${{ inputs.database-user }}" \
+          -d "${{ inputs.database-name }}" -c "SELECT version();" || true
+
+    # ── Install sqlx-cli (cached) ──────────────────────────────────────────
+    - name: Install sqlx-cli
+      if: inputs.run-migrations == 'true'
+      shell: bash
+      run: |
+        if command -v sqlx &> /dev/null; then
+          echo "sqlx-cli already installed: $(sqlx --version)"
+        else
+          echo "::group::Installing sqlx-cli"
+          cargo install sqlx-cli \
+            --no-default-features \
+            --features rustls,postgres \
+            --locked
+          echo "::endgroup::"
+        fi
+
+    # ── Run migrations ─────────────────────────────────────────────────────
+    - name: Run database migrations
+      if: inputs.run-migrations == 'true'
+      shell: bash
+      run: |
+        echo "::group::Running migrations from ${{ inputs.migrations-path }}"
+        sqlx migrate run --source "${{ inputs.migrations-path }}"
+        echo "::endgroup::"
+
+        echo "::group::Migration status"
+        sqlx migrate info --source "${{ inputs.migrations-path }}"
+        echo "::endgroup::"
