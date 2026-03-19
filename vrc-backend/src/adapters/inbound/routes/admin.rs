@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::AppState;
+use crate::adapters::inbound::extractors::{ValidatedJson, ValidatedPayload, ValidatedQuery};
 use crate::adapters::outbound::markdown::renderer::PulldownCmarkRenderer;
 use crate::auth::extractor::AuthenticatedUser;
 use crate::auth::roles::{Admin, Role, Staff};
@@ -105,7 +106,7 @@ struct AdminReportView {
     reporter_user_id: Uuid,
     reporter_display_name: String,
     target_type: ReportTargetType,
-    target_id: Uuid,
+    target_id: String,
     reason: String,
     status: ReportStatus,
     created_at: DateTime<Utc>,
@@ -134,6 +135,16 @@ struct CreateClubRequest {
     owner_user_id: Uuid,
 }
 
+impl ValidatedPayload for CreateClubRequest {
+    fn validate_payload(&self) -> Result<(), HashMap<String, String>> {
+        self.validate()
+    }
+
+    fn validation_error(errors: HashMap<String, String>) -> ApiError {
+        ApiError::ValidationError(errors)
+    }
+}
+
 #[derive(Serialize)]
 struct ClubResponse {
     id: Uuid,
@@ -157,6 +168,16 @@ struct UploadGalleryRequest {
     image_url: String,
     #[validate(max_length = 200)]
     caption: Option<String>,
+}
+
+impl ValidatedPayload for UploadGalleryRequest {
+    fn validate_payload(&self) -> Result<(), HashMap<String, String>> {
+        self.validate()
+    }
+
+    fn validation_error(errors: HashMap<String, String>) -> ApiError {
+        ApiError::ValidationError(errors)
+    }
 }
 
 #[derive(Serialize)]
@@ -196,12 +217,13 @@ struct AdminUserRow {
     updated_at: DateTime<Utc>,
 }
 
+#[derive(sqlx::FromRow)]
 struct ReportRow {
     id: Uuid,
     reporter_user_id: Uuid,
     reporter_display_name: String,
     target_type: ReportTargetType,
-    target_id: Uuid,
+    target_id: String,
     reason: String,
     status: ReportStatus,
     created_at: DateTime<Utc>,
@@ -209,12 +231,12 @@ struct ReportRow {
 
 // ===== Handlers =====
 
+#[vrc_macros::handler(method = GET, path = "/api/v1/internal/admin/users", role = Admin, rate_limit = "internal", summary = "List users")]
 async fn list_users(
     State(state): State<Arc<AppState>>,
     _auth: AuthenticatedUser<Admin>,
-    Query(query): Query<UserListQuery>,
-) -> Result<Json<PageResponse<AdminUserView>>, ApiError> {
-
+    ValidatedQuery(query): ValidatedQuery<UserListQuery>,
+) -> Result<PageResponse<AdminUserView>, ApiError> {
     let rows = sqlx::query_as!(
         AdminUserRow,
         r#"
@@ -264,7 +286,7 @@ async fn list_users(
         })
         .collect();
 
-    Ok(Json(PageResponse::new(items, count, query.page.per_page())))
+    Ok(PageResponse::new(items, count, query.page.per_page()))
 }
 
 /// Validate role change authorization rules per spec:
@@ -300,6 +322,7 @@ fn validate_role_change(
     Ok(())
 }
 
+#[vrc_macros::handler(method = PATCH, path = "/api/v1/internal/admin/users/{id}/role", role = Admin, rate_limit = "internal", summary = "Change user role")]
 async fn change_user_role(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedUser<Admin>,
@@ -351,6 +374,7 @@ async fn change_user_role(
     }))
 }
 
+#[vrc_macros::handler(method = PATCH, path = "/api/v1/internal/admin/users/{id}/status", role = Admin, rate_limit = "internal", summary = "Change user status")]
 async fn change_user_status(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedUser<Admin>,
@@ -402,7 +426,9 @@ async fn change_user_status(
             user_id = %user_id,
             "Failed to invalidate sessions during user suspension"
         );
-        return Err(ApiError::Internal("Failed to invalidate sessions".to_owned()));
+        return Err(ApiError::Internal(
+            "Failed to invalidate sessions".to_owned(),
+        ));
     }
 
     tracing::info!(
@@ -419,22 +445,21 @@ async fn change_user_status(
     }))
 }
 
+#[vrc_macros::handler(method = GET, path = "/api/v1/internal/admin/reports", role = Staff, rate_limit = "internal", summary = "List reports")]
 async fn list_reports(
     State(state): State<Arc<AppState>>,
     _auth: AuthenticatedUser<Staff>,
-    Query(query): Query<ReportListQuery>,
-) -> Result<Json<PageResponse<AdminReportView>>, ApiError> {
-
-    let rows = sqlx::query_as!(
-        ReportRow,
+    ValidatedQuery(query): ValidatedQuery<ReportListQuery>,
+) -> Result<PageResponse<AdminReportView>, ApiError> {
+    let rows = sqlx::query_as::<_, ReportRow>(
         r#"
         SELECT r.id,
                r.reporter_user_id,
                u.discord_display_name as reporter_display_name,
-               r.target_type as "target_type: ReportTargetType",
+               r.target_type,
                r.target_id,
                r.reason,
-               r.status as "status: ReportStatus",
+               r.status,
                r.created_at
         FROM reports r
         JOIN users u ON u.id = r.reporter_user_id
@@ -442,10 +467,10 @@ async fn list_reports(
         ORDER BY r.created_at DESC
         LIMIT $2 OFFSET $3
         "#,
-        query.status as Option<ReportStatus>,
-        query.page.limit(),
-        query.page.offset()
     )
+    .bind(query.status)
+    .bind(query.page.limit())
+    .bind(query.page.offset())
     .fetch_all(&state.db_pool)
     .await
     .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -476,17 +501,18 @@ async fn list_reports(
         })
         .collect();
 
-    Ok(Json(PageResponse::new(items, count, query.page.per_page())))
+    Ok(PageResponse::new(items, count, query.page.per_page()))
 }
 
+#[vrc_macros::handler(method = PATCH, path = "/api/v1/internal/admin/reports/{id}", role = Staff, rate_limit = "internal", summary = "Resolve report")]
 async fn resolve_report(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedUser<Staff>,
     Path(report_id): Path<Uuid>,
     Json(body): Json<ResolveReportRequest>,
 ) -> Result<Json<ResolveReportResponse>, ApiError> {
-    // Only allow resolving to reviewed or dismissed — not back to pending
-    if body.status == ReportStatus::Pending {
+    // Only allow resolving to reviewed or dismissed — not back to open
+    if body.status == ReportStatus::Open {
         let mut errors = HashMap::new();
         errors.insert(
             "status".to_owned(),
@@ -523,16 +549,12 @@ async fn resolve_report(
     }))
 }
 
+#[vrc_macros::handler(method = POST, path = "/api/v1/internal/admin/clubs", role = Staff, rate_limit = "internal", summary = "Create club")]
 async fn create_club(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedUser<Staff>,
-    Json(body): Json<CreateClubRequest>,
+    ValidatedJson(body): ValidatedJson<CreateClubRequest>,
 ) -> Result<(StatusCode, Json<ClubResponse>), ApiError> {
-    // Validate fields via derive macro
-    if let Err(errors) = body.validate() {
-        return Err(ApiError::ValidationError(errors));
-    }
-
     // Verify owner is an active user
     let owner_exists = sqlx::query_scalar!(
         r#"SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND status = 'active') as "exists!: bool""#,
@@ -621,17 +643,17 @@ async fn create_club(
     ))
 }
 
+#[vrc_macros::handler(method = POST, path = "/api/v1/internal/admin/clubs/{id}/gallery", role = Staff, rate_limit = "internal", summary = "Upload gallery image")]
 async fn upload_gallery_image(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedUser<Staff>,
     Path(club_id): Path<Uuid>,
-    Json(body): Json<UploadGalleryRequest>,
+    ValidatedJson(body): ValidatedJson<UploadGalleryRequest>,
 ) -> Result<(StatusCode, Json<GalleryUploadResponse>), ApiError> {
-    // Validate fields via derive macro (length checks on image_url and caption)
-    let mut errors = body.validate().err().unwrap_or_default();
+    let mut errors = HashMap::new();
 
     // Stricter URL validation beyond basic length check
-    if !errors.contains_key("image_url") && !is_valid_https_url(&body.image_url) {
+    if !is_valid_https_url(&body.image_url) {
         errors.insert(
             "image_url".to_owned(),
             "有効なHTTPS URLを入力してください".to_owned(),
@@ -687,6 +709,7 @@ async fn upload_gallery_image(
     ))
 }
 
+#[vrc_macros::handler(method = PATCH, path = "/api/v1/internal/admin/gallery/{image_id}/status", role = Staff, rate_limit = "internal", summary = "Update gallery status")]
 async fn update_gallery_status(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedUser<Staff>,
