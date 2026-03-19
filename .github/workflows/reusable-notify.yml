@@ -1,0 +1,152 @@
+# =============================================================================
+#  Reusable Workflow: Discord Notification
+#  Rich Discord webhook notifications with deployment status, metrics,
+#  and actionable links. Supports multiple notification tiers.
+# =============================================================================
+name: "Reusable — Discord Notify"
+
+on:
+  workflow_call:
+    inputs:
+      runner-label:
+        description: "Runner label"
+        required: false
+        type: string
+        default: "arc-runner-set"
+      status:
+        description: "Pipeline status (success, failure, cancelled)"
+        required: true
+        type: string
+      title:
+        description: "Notification title"
+        required: false
+        type: string
+        default: "VRC Backend Pipeline"
+      environment:
+        description: "Deployment environment (if applicable)"
+        required: false
+        type: string
+        default: ""
+      deploy-status:
+        description: "Deployment status detail"
+        required: false
+        type: string
+        default: ""
+      deploy-duration:
+        description: "Deployment duration in seconds"
+        required: false
+        type: string
+        default: ""
+      image-tag:
+        description: "Docker image tag"
+        required: false
+        type: string
+        default: ""
+      additional-message:
+        description: "Extra message to include"
+        required: false
+        type: string
+        default: ""
+      mention-on-failure:
+        description: "Discord role ID to mention on failure"
+        required: false
+        type: string
+        default: ""
+    secrets:
+      DISCORD_WEBHOOK_URL:
+        required: true
+
+permissions: {}
+
+jobs:
+  notify:
+    name: "Discord Notification"
+    runs-on: ${{ inputs.runner-label }}
+    timeout-minutes: 5
+    steps:
+      - name: Send Discord notification
+        shell: bash
+        env:
+          WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          # Determine color based on status
+          case "${{ inputs.status }}" in
+            success)  COLOR=3066993  ;; # Green
+            failure)  COLOR=15158332 ;; # Red
+            cancelled) COLOR=9807270 ;; # Grey
+            *)        COLOR=15105570 ;; # Orange
+          esac
+
+          # Determine status emoji
+          case "${{ inputs.status }}" in
+            success)   EMOJI="✅" ;;
+            failure)   EMOJI="❌" ;;
+            cancelled) EMOJI="⚠️" ;;
+            *)         EMOJI="🔄" ;;
+          esac
+
+          # Build description
+          DESC="${EMOJI} **Status:** ${{ inputs.status }}"
+          DESC="${DESC}\n**Commit:** [\`${GITHUB_SHA::8}\`](${{ github.server_url }}/${{ github.repository }}/commit/${GITHUB_SHA})"
+          DESC="${DESC}\n**Branch:** \`${{ github.ref_name }}\`"
+          DESC="${DESC}\n**Actor:** ${{ github.actor }}"
+          DESC="${DESC}\n**Workflow:** [${{ github.workflow }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+
+          if [[ -n "${{ inputs.environment }}" ]]; then
+            DESC="${DESC}\n**Environment:** ${{ inputs.environment }}"
+          fi
+
+          if [[ -n "${{ inputs.deploy-status }}" ]]; then
+            DESC="${DESC}\n**Deploy:** ${{ inputs.deploy-status }}"
+          fi
+
+          if [[ -n "${{ inputs.deploy-duration }}" ]]; then
+            DESC="${DESC}\n**Duration:** ${{ inputs.deploy-duration }}s"
+          fi
+
+          if [[ -n "${{ inputs.image-tag }}" ]]; then
+            DESC="${DESC}\n**Image:** \`${{ inputs.image-tag }}\`"
+          fi
+
+          if [[ -n "${{ inputs.additional-message }}" ]]; then
+            DESC="${DESC}\n\n${{ inputs.additional-message }}"
+          fi
+
+          # Build mention prefix for failures
+          CONTENT=""
+          if [[ "${{ inputs.status }}" == "failure" && -n "${{ inputs.mention-on-failure }}" ]]; then
+            CONTENT="<@&${{ inputs.mention-on-failure }}>"
+          fi
+
+          # Build JSON payload (using heredoc to avoid quoting issues)
+          PAYLOAD=$(cat <<EOFPAYLOAD
+          {
+            "content": "${CONTENT}",
+            "embeds": [{
+              "title": "${{ inputs.title }}",
+              "description": "$(echo -e "${DESC}")",
+              "color": ${COLOR},
+              "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+              "footer": {
+                "text": "Run #${{ github.run_number }} • ${{ github.repository }}"
+              }
+            }]
+          }
+          EOFPAYLOAD
+          )
+
+          # Send webhook with retry
+          for attempt in 1 2 3; do
+            HTTP_CODE=$(curl -sf -o /dev/null -w '%{http_code}' \
+              -H "Content-Type: application/json" \
+              -d "${PAYLOAD}" \
+              "${WEBHOOK_URL}" 2>/dev/null || echo "000")
+
+            if [[ "${HTTP_CODE}" =~ ^2[0-9]{2}$ ]]; then
+              echo "✓ Discord notification sent (HTTP ${HTTP_CODE})"
+              break
+            fi
+
+            echo "⚠ Discord webhook failed (HTTP ${HTTP_CODE}), attempt ${attempt}/3"
+            sleep $(( attempt * 2 ))
+          done
