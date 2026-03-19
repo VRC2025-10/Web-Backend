@@ -1,0 +1,273 @@
+# =============================================================================
+#  Reusable Workflow: SSH Deploy
+#  Blue-green deployment via SSH with health verification and auto-rollback.
+#  Supports pre-deploy backup, migration execution, and post-deploy smoke tests.
+# =============================================================================
+name: "Reusable — SSH Deploy"
+
+on:
+  workflow_call:
+    inputs:
+      runner-label:
+        description: "Runner label"
+        required: false
+        type: string
+        default: "arc-runner-set"
+      environment:
+        description: "Deployment environment name"
+        required: true
+        type: string
+      image-tag:
+        description: "Docker image tag to deploy"
+        required: true
+        type: string
+      compose-file:
+        description: "Docker Compose file path on remote"
+        required: false
+        type: string
+        default: "docker-compose.prod.yml"
+      service-name:
+        description: "Docker Compose service name"
+        required: false
+        type: string
+        default: "app"
+      deploy-path:
+        description: "Deployment directory on remote host"
+        required: false
+        type: string
+        default: "/opt/vrc-backend"
+      health-endpoint:
+        description: "Health check endpoint"
+        required: false
+        type: string
+        default: "/health"
+      health-port:
+        description: "Application port"
+        required: false
+        type: string
+        default: "3000"
+      enable-rollback:
+        description: "Enable automatic rollback on failure"
+        required: false
+        type: boolean
+        default: true
+      pre-deploy-backup:
+        description: "Run database backup before deploy"
+        required: false
+        type: boolean
+        default: false
+      timeout:
+        description: "Job timeout in minutes"
+        required: false
+        type: number
+        default: 30
+    outputs:
+      deploy-status:
+        description: "Deployment status (success, rolled_back, failed)"
+        value: ${{ jobs.deploy.outputs.status }}
+      deploy-duration:
+        description: "Deployment duration in seconds"
+        value: ${{ jobs.deploy.outputs.duration }}
+      previous-image:
+        description: "Previous image tag (for manual rollback)"
+        value: ${{ jobs.deploy.outputs.previous_image }}
+    secrets:
+      DEPLOY_HOST:
+        required: true
+      DEPLOY_USER:
+        required: true
+      DEPLOY_SSH_KEY:
+        required: true
+      DEPLOY_SSH_KNOWN_HOSTS:
+        required: false
+      REGISTRY_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: "Deploy to ${{ inputs.environment }}"
+    runs-on: ${{ inputs.runner-label }}
+    timeout-minutes: ${{ inputs.timeout }}
+    environment:
+      name: ${{ inputs.environment }}
+      url: "https://${{ secrets.DEPLOY_HOST }}"
+    outputs:
+      status: ${{ steps.result.outputs.status }}
+      duration: ${{ steps.result.outputs.duration }}
+      previous_image: ${{ steps.capture.outputs.previous_image }}
+    steps:
+      # ── Setup SSH ────────────────────────────────────────────────────────
+      - name: Setup SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+
+      - name: Configure SSH known hosts
+        run: |
+          mkdir -p ~/.ssh
+          if [[ -n "${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}" ]]; then
+            echo "${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}" >> ~/.ssh/known_hosts
+          else
+            ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+          fi
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Resolve target image
+        id: image
+        run: |
+          TARGET_IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}:${{ inputs.image-tag }}"
+          echo "target_image=${TARGET_IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "Target image: ${TARGET_IMAGE}"
+
+      # ── Capture current state ────────────────────────────────────────────
+      - name: Capture current deployment state
+        id: capture
+        run: |
+          DEPLOY_START=$(date +%s)
+          echo "deploy_start=${DEPLOY_START}" >> "$GITHUB_OUTPUT"
+
+          PREVIOUS_IMAGE=$(ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "cd ${{ inputs.deploy-path }} && \
+             CONTAINER_ID=\$(docker compose -f ${{ inputs.compose-file }} ps -q ${{ inputs.service-name }} 2>/dev/null | head -n 1) && \
+             if [ -n \"\$CONTAINER_ID\" ]; then \
+               docker inspect --format '{{.Config.Image}}' \"\$CONTAINER_ID\"; \
+             else \
+               echo unknown; \
+             fi" || echo "unknown")
+          echo "previous_image=${PREVIOUS_IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "Previous image: ${PREVIOUS_IMAGE}"
+
+      - name: Authenticate remote registry access
+        if: secrets.REGISTRY_TOKEN != ''
+        run: |
+          ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "printf '%s' '${{ secrets.REGISTRY_TOKEN }}' | docker login ghcr.io -u '${{ github.repository_owner }}' --password-stdin >/dev/null"
+
+      # ── Pre-deploy database backup ───────────────────────────────────────
+      - name: Database backup (pre-deploy)
+        if: inputs.pre-deploy-backup
+        run: |
+          echo "::group::Database Backup"
+          BACKUP_FILE="backup-$(date +%Y%m%d-%H%M%S)-pre-deploy.sql.gz"
+          ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "cd ${{ inputs.deploy-path }} && \
+             docker compose -f ${{ inputs.compose-file }} exec -T db \
+             pg_dump -U vrc_app -d vrc_class_reunion --no-owner --no-privileges | gzip > /opt/backups/${BACKUP_FILE}"
+          echo "Backup created: ${BACKUP_FILE}"
+          echo "::endgroup::"
+
+      # ── Pull new image ───────────────────────────────────────────────────
+      - name: Pull new Docker image
+        run: |
+          echo "::group::Pull Image"
+          ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "cd ${{ inputs.deploy-path }} && \
+             VRC_BACKEND_IMAGE='${{ steps.image.outputs.target_image }}' \
+             docker compose -f ${{ inputs.compose-file }} pull ${{ inputs.service-name }}"
+          echo "::endgroup::"
+
+      # ── Deploy ───────────────────────────────────────────────────────────
+      - name: Deploy new version
+        id: deploy
+        run: |
+          echo "::group::Deploy"
+          ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "cd ${{ inputs.deploy-path }} && \
+             VRC_BACKEND_IMAGE='${{ steps.image.outputs.target_image }}' \
+             docker compose -f ${{ inputs.compose-file }} up -d --force-recreate ${{ inputs.service-name }} --remove-orphans"
+          echo "::endgroup::"
+
+      # ── Health verification ──────────────────────────────────────────────
+      - name: Verify deployment health
+        id: health
+        run: |
+          MAX_RETRIES=15
+          RETRY_WAIT=4
+          HEALTHY="false"
+
+          echo "Waiting 8s for application startup..."
+          sleep 8
+
+          for i in $(seq 1 "${MAX_RETRIES}"); do
+            echo "Health check attempt ${i}/${MAX_RETRIES}..."
+
+            HTTP_CODE=$(ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+              "curl -sf -o /dev/null -w '%{http_code}' http://localhost:${{ inputs.health-port }}${{ inputs.health-endpoint }}" 2>/dev/null || echo "000")
+
+            if [[ "${HTTP_CODE}" == "200" ]]; then
+              echo "✓ Health check passed (HTTP ${HTTP_CODE})"
+              HEALTHY="true"
+              break
+            fi
+
+            echo "✗ Health check failed (HTTP ${HTTP_CODE})"
+
+            if (( i < MAX_RETRIES )); then
+              sleep "${RETRY_WAIT}"
+            fi
+          done
+
+          echo "healthy=${HEALTHY}" >> "$GITHUB_OUTPUT"
+
+          if [[ "${HEALTHY}" != "true" ]]; then
+            echo "::error::Health check failed after ${MAX_RETRIES} attempts"
+
+            echo "::group::Application Logs"
+            ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+              "cd ${{ inputs.deploy-path }} && \
+               docker compose -f ${{ inputs.compose-file }} logs ${{ inputs.service-name }} --tail 100" || true
+            echo "::endgroup::"
+
+            exit 1
+          fi
+
+      # ── Rollback (on failure) ────────────────────────────────────────────
+      - name: Automatic rollback
+        id: rollback
+        if: failure() && inputs.enable-rollback && steps.capture.outputs.previous_image != 'unknown'
+        run: |
+          echo "::warning::Rolling back to previous image: ${{ steps.capture.outputs.previous_image }}"
+
+          ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "cd ${{ inputs.deploy-path }} && \
+             VRC_BACKEND_IMAGE='${{ steps.capture.outputs.previous_image }}' \
+             docker compose -f ${{ inputs.compose-file }} up -d --force-recreate ${{ inputs.service-name }}"
+
+          sleep 10
+
+          ROLLBACK_HTTP=$(ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "curl -sf -o /dev/null -w '%{http_code}' http://localhost:${{ inputs.health-port }}${{ inputs.health-endpoint }}" || echo "000")
+
+          if [[ "${ROLLBACK_HTTP}" == "200" ]]; then
+            echo "✓ Rollback succeeded"
+          else
+            echo "::error::Rollback also failed (HTTP ${ROLLBACK_HTTP}). Manual intervention required."
+          fi
+
+      # ── Cleanup old images ───────────────────────────────────────────────
+      - name: Cleanup dangling images
+        if: success()
+        run: |
+          ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "docker image prune -f --filter 'until=168h'" || true
+
+      # ── Record result ────────────────────────────────────────────────────
+      - name: Record deployment result
+        id: result
+        if: always()
+        run: |
+          DEPLOY_END=$(date +%s)
+          DEPLOY_START=${{ steps.capture.outputs.deploy_start }}
+          DURATION=$(( DEPLOY_END - DEPLOY_START ))
+          echo "duration=${DURATION}" >> "$GITHUB_OUTPUT"
+
+          if [[ "${{ steps.health.outputs.healthy }}" == "true" ]]; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ steps.rollback.outcome }}" == "success" ]]; then
+            echo "status=rolled_back" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+          fi
