@@ -124,27 +124,7 @@ jobs:
           fi
 
           # Build JSON payload with proper escaping for multiline content.
-          PAYLOAD=$(DESC="${DESC}" CONTENT="${CONTENT}" COLOR="${COLOR}" TITLE="${TITLE}" python3 -c '
-import json, os
-from datetime import datetime, timezone
-
-payload = {
-    "content": os.environ["CONTENT"],
-    "embeds": [
-        {
-            "title": os.environ["TITLE"],
-            "description": os.environ["DESC"],
-            "color": int(os.environ["COLOR"]),
-            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "footer": {
-                "text": "Run #{} • {}".format(os.environ["GITHUB_RUN_NUMBER"], os.environ["GITHUB_REPOSITORY"])
-            },
-        }
-    ],
-}
-
-print(json.dumps(payload))
-')
+            PAYLOAD=$(DESC="${DESC}" CONTENT="${CONTENT}" COLOR="${COLOR}" TITLE="${TITLE}" python3 -c 'import json, os; from datetime import datetime, timezone; print(json.dumps({"content": os.environ["CONTENT"], "embeds": [{"title": os.environ["TITLE"], "description": os.environ["DESC"], "color": int(os.environ["COLOR"]), "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "footer": {"text": "Run #{} • {}".format(os.environ["GITHUB_RUN_NUMBER"], os.environ["GITHUB_REPOSITORY"])}}]}))')
 
           # Send webhook with retry
           for attempt in 1 2 3; do

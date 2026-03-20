@@ -140,10 +140,16 @@ jobs:
           echo "Previous image: ${PREVIOUS_IMAGE}"
 
       - name: Authenticate remote registry access
-        if: secrets.REGISTRY_TOKEN != ''
+        env:
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
         run: |
+          if [[ -z "${REGISTRY_TOKEN}" ]]; then
+            echo "REGISTRY_TOKEN is not configured; skipping remote registry login"
+            exit 0
+          fi
+
           ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
-            "printf '%s' '${{ secrets.REGISTRY_TOKEN }}' | docker login ghcr.io -u '${{ github.repository_owner }}' --password-stdin >/dev/null"
+            "printf '%s' '${REGISTRY_TOKEN}' | docker login ghcr.io -u '${{ github.repository_owner }}' --password-stdin >/dev/null"
 
       # ── Pre-deploy database backup ───────────────────────────────────────
       - name: Database backup (pre-deploy)
