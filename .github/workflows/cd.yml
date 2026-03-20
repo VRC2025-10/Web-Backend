@@ -126,7 +126,7 @@ jobs:
       - name: Verify image exists in registry
         id: check-image
         run: |
-          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image-tag }}"
+          IMAGE="${{ steps.resolve-image.outputs.target_image }}"
           echo "Checking for image: ${IMAGE}"
 
           if docker manifest inspect "${IMAGE}" > /dev/null 2>&1; then

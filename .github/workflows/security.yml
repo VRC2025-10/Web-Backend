@@ -351,10 +351,6 @@ jobs:
     runs-on: arc-runner-set
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
       - name: Dependency review
         uses: actions/dependency-review-action@v4
         with:

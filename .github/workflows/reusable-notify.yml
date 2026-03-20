@@ -68,9 +68,22 @@ jobs:
         shell: bash
         env:
           WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          STATUS: ${{ inputs.status }}
+          TITLE: ${{ inputs.title }}
+          ENVIRONMENT_NAME: ${{ inputs.environment }}
+          DEPLOY_STATUS: ${{ inputs.deploy-status }}
+          DEPLOY_DURATION: ${{ inputs.deploy-duration }}
+          IMAGE_TAG: ${{ inputs.image-tag }}
+          ADDITIONAL_MESSAGE: ${{ inputs.additional-message }}
+          MENTION_ON_FAILURE: ${{ inputs.mention-on-failure }}
         run: |
+          if [[ -z "${WEBHOOK_URL}" ]]; then
+            echo "Discord webhook is not configured; skipping notification"
+            exit 0
+          fi
+
           # Determine color based on status
-          case "${{ inputs.status }}" in
+          case "${STATUS}" in
             success)  COLOR=3066993  ;; # Green
             failure)  COLOR=15158332 ;; # Red
             cancelled) COLOR=9807270 ;; # Grey
@@ -78,54 +91,60 @@ jobs:
           esac
 
           # Build description
-          DESC="**Status:** ${{ inputs.status }}"
-          DESC="${DESC}\n**Commit:** [\`${GITHUB_SHA::8}\`](${{ github.server_url }}/${{ github.repository }}/commit/${GITHUB_SHA})"
-          DESC="${DESC}\n**Branch:** \`${{ github.ref_name }}\`"
-          DESC="${DESC}\n**Actor:** ${{ github.actor }}"
-          DESC="${DESC}\n**Workflow:** [${{ github.workflow }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+          DESC="**Status:** ${STATUS}"
+          DESC+=$'\n'"**Commit:** [\`${GITHUB_SHA::8}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA})"
+          DESC+=$'\n'"**Branch:** \`${GITHUB_REF_NAME}\`"
+          DESC+=$'\n'"**Actor:** ${GITHUB_ACTOR}"
+          DESC+=$'\n'"**Workflow:** [${GITHUB_WORKFLOW}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})"
 
-          if [[ -n "${{ inputs.environment }}" ]]; then
-            DESC="${DESC}\n**Environment:** ${{ inputs.environment }}"
+          if [[ -n "${ENVIRONMENT_NAME}" ]]; then
+            DESC+=$'\n'"**Environment:** ${ENVIRONMENT_NAME}"
           fi
 
-          if [[ -n "${{ inputs.deploy-status }}" ]]; then
-            DESC="${DESC}\n**Deploy:** ${{ inputs.deploy-status }}"
+          if [[ -n "${DEPLOY_STATUS}" ]]; then
+            DESC+=$'\n'"**Deploy:** ${DEPLOY_STATUS}"
           fi
 
-          if [[ -n "${{ inputs.deploy-duration }}" ]]; then
-            DESC="${DESC}\n**Duration:** ${{ inputs.deploy-duration }}s"
+          if [[ -n "${DEPLOY_DURATION}" ]]; then
+            DESC+=$'\n'"**Duration:** ${DEPLOY_DURATION}s"
           fi
 
-          if [[ -n "${{ inputs.image-tag }}" ]]; then
-            DESC="${DESC}\n**Image:** \`${{ inputs.image-tag }}\`"
+          if [[ -n "${IMAGE_TAG}" ]]; then
+            DESC+=$'\n'"**Image:** \`${IMAGE_TAG}\`"
           fi
 
-          if [[ -n "${{ inputs.additional-message }}" ]]; then
-            DESC="${DESC}\n\n${{ inputs.additional-message }}"
+          if [[ -n "${ADDITIONAL_MESSAGE}" ]]; then
+            DESC+=$'\n\n'"${ADDITIONAL_MESSAGE}"
           fi
 
           # Build mention prefix for failures
           CONTENT=""
-          if [[ "${{ inputs.status }}" == "failure" && -n "${{ inputs.mention-on-failure }}" ]]; then
-            CONTENT="<@&${{ inputs.mention-on-failure }}>"
+          if [[ "${STATUS}" == "failure" && -n "${MENTION_ON_FAILURE}" ]]; then
+            CONTENT="<@&${MENTION_ON_FAILURE}>"
           fi
 
-          # Build JSON payload (using heredoc to avoid quoting issues)
-          PAYLOAD=$(cat <<EOFPAYLOAD
-          {
-            "content": "${CONTENT}",
-            "embeds": [{
-              "title": "${{ inputs.title }}",
-              "description": "$(echo -e "${DESC}")",
-              "color": ${COLOR},
-              "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-              "footer": {
-                "text": "Run #${{ github.run_number }} • ${{ github.repository }}"
-              }
-            }]
-          }
-          EOFPAYLOAD
-          )
+          # Build JSON payload with proper escaping for multiline content.
+          PAYLOAD=$(DESC="${DESC}" CONTENT="${CONTENT}" COLOR="${COLOR}" TITLE="${TITLE}" python3 -c '
+import json, os
+from datetime import datetime, timezone
+
+payload = {
+    "content": os.environ["CONTENT"],
+    "embeds": [
+        {
+            "title": os.environ["TITLE"],
+            "description": os.environ["DESC"],
+            "color": int(os.environ["COLOR"]),
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "footer": {
+                "text": "Run #{} • {}".format(os.environ["GITHUB_RUN_NUMBER"], os.environ["GITHUB_REPOSITORY"])
+            },
+        }
+    ],
+}
+
+print(json.dumps(payload))
+')
 
           # Send webhook with retry
           for attempt in 1 2 3; do
