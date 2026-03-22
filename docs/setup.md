@@ -40,7 +40,7 @@ cp .env.example .env
 | `SESSION_CLEANUP_INTERVAL_SECS` | `3600` | 期限切れセッション掃除間隔（秒） |
 | `MEMBER_SYNC_INTERVAL_SECS` | `3600` | メンバー同期間隔（秒） |
 | `EVENT_ARCHIVE_INTERVAL_SECS` | `86400` | イベントアーカイブ間隔（秒） |
-| `SUPER_ADMIN_DISCORD_ID` | *(なし)* | SuperAdmin として自動作成するユーザーの Discord ID |
+| `SUPER_ADMIN_DISCORD_ID` | *(なし)* | SuperAdmin として自動作成するユーザーの Discord ID。複数指定時はカンマ区切り |
 
 ## トークンの生成方法
 
@@ -89,7 +89,7 @@ sqlx migrate run
 
 ### SuperAdmin の自動作成 (Bootstrap)
 
-環境変数 `SUPER_ADMIN_DISCORD_ID` が設定されている場合、サーバー起動時に自動的に SuperAdmin ユーザーが作成されます。
+環境変数 `SUPER_ADMIN_DISCORD_ID` が設定されている場合、サーバー起動時に自動的に SuperAdmin ユーザーが作成されます。複数人を指定する場合はカンマ区切りで設定できます。
 
 - 指定された Discord ID を持つユーザーが DB に存在しなければ、ダミー名（`システム管理者`）で `users` と `profiles` レコードを自動作成し、ロールを `super_admin` に設定
 - 既にユーザーが存在する場合は、ロールを `super_admin` に昇格
@@ -97,7 +97,7 @@ sqlx migrate run
 
 ```bash
 # .env に追加
-SUPER_ADMIN_DISCORD_ID=123456789012345678
+SUPER_ADMIN_DISCORD_ID=123456789012345678,987654321098765432
 ```
 
 ## 起動
