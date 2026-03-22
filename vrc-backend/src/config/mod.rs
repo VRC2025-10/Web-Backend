@@ -85,6 +85,34 @@ impl AppConfig {
             trust_x_forwarded_for: parse_bool_env("TRUST_X_FORWARDED_FOR", false)?,
         })
     }
+
+    /// Return the configured super admin Discord IDs.
+    ///
+    /// The environment variable accepts a single ID or a comma/whitespace
+    /// separated list to simplify local bootstrap for multiple operators.
+    #[must_use]
+    pub fn super_admin_discord_ids(&self) -> Vec<&str> {
+        self.super_admin_discord_id
+            .as_deref()
+            .map(parse_super_admin_discord_ids)
+            .unwrap_or_default()
+    }
+
+    /// Check whether a Discord ID is configured for super admin bootstrap.
+    #[must_use]
+    pub fn is_super_admin_discord_id(&self, discord_id: &str) -> bool {
+        self.super_admin_discord_ids()
+            .into_iter()
+            .any(|configured_id| configured_id == discord_id)
+    }
+}
+
+fn parse_super_admin_discord_ids(value: &str) -> Vec<&str> {
+    value
+        .split(|character: char| character == ',' || character.is_ascii_whitespace())
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .collect()
 }
 
 fn require_env(key: &str) -> Result<String, ConfigError> {
@@ -534,5 +562,44 @@ mod tests {
 
         assert!(!config.cookie_secure);
         assert!(config.trust_x_forwarded_for);
+    }
+
+    #[test]
+    fn test_parse_super_admin_discord_ids_supports_multiple_delimiters() {
+        let ids = parse_super_admin_discord_ids("111, 222\n333\t444");
+
+        assert_eq!(ids, vec!["111", "222", "333", "444"]);
+    }
+
+    #[test]
+    fn test_is_super_admin_discord_id_matches_any_configured_id() {
+        let config = AppConfig {
+            bind_address: "127.0.0.1:0".to_owned(),
+            database_url: SecretString::from("postgres://test:test@localhost/test".to_owned()),
+            database_max_connections: 5,
+            discord_client_id: "discord-client-id".to_owned(),
+            discord_client_secret: SecretString::from(
+                "0123456789abcdef0123456789abcdef".to_owned(),
+            ),
+            discord_guild_id: "guild-id".to_owned(),
+            backend_base_url: "https://backend.example".to_owned(),
+            frontend_origin: "https://frontend.example".to_owned(),
+            frontend_origin_header: "https://frontend.example".parse().expect("valid header"),
+            session_secret: SecretString::from("abcdefghijklmnopqrstuvwxyz012345".to_owned()),
+            system_api_token: SecretString::from(
+                "0123456789abcdefghijklmnopqrstuvwxyz".to_owned(),
+            ),
+            session_max_age_secs: 604_800,
+            session_cleanup_interval_secs: 3600,
+            event_archival_interval_secs: 3600,
+            super_admin_discord_id: Some("111,222".to_owned()),
+            discord_webhook_url: None,
+            cookie_secure: false,
+            trust_x_forwarded_for: false,
+        };
+
+        assert!(config.is_super_admin_discord_id("111"));
+        assert!(config.is_super_admin_discord_id("222"));
+        assert!(!config.is_super_admin_discord_id("333"));
     }
 }

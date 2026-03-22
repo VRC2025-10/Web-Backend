@@ -248,16 +248,38 @@ async fn callback(
 
     // 5. Upsert user
     let avatar_url = discord_user.avatar_url();
+    let is_super_admin = state.config.is_super_admin_discord_id(&discord_user.id);
     let user = sqlx::query_as!(
         crate::domain::entities::user::User,
         r#"
-        INSERT INTO users (discord_id, discord_username, discord_display_name, discord_avatar_hash, avatar_url)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO users (
+            discord_id,
+            discord_username,
+            discord_display_name,
+            discord_avatar_hash,
+            avatar_url,
+            role
+        )
+        VALUES (
+            $1,
+            $2,
+            $3,
+            $4,
+            $5,
+            CASE
+                WHEN $6 THEN 'super_admin'::user_role
+                ELSE 'member'::user_role
+            END
+        )
         ON CONFLICT (discord_id) DO UPDATE SET
             discord_username = EXCLUDED.discord_username,
             discord_display_name = EXCLUDED.discord_display_name,
             discord_avatar_hash = EXCLUDED.discord_avatar_hash,
             avatar_url = EXCLUDED.avatar_url,
+            role = CASE
+                WHEN $6 THEN 'super_admin'::user_role
+                ELSE users.role
+            END,
             updated_at = NOW()
         RETURNING id, discord_id, discord_username, discord_display_name,
                   discord_avatar_hash, avatar_url,
@@ -270,6 +292,7 @@ async fn callback(
         discord_user.display_name(),
         discord_user.avatar.as_deref(),
         avatar_url.as_deref(),
+        is_super_admin,
     )
     .fetch_one(&state.db_pool)
     .await;

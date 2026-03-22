@@ -88,8 +88,8 @@ async fn run() -> Result<(), StartupError> {
         .await
         .map_err(StartupError::DatabaseMigration)?;
 
-    // Bootstrap super admin if configured
-    if let Some(ref discord_id) = config.super_admin_discord_id {
+    // Bootstrap every configured super admin before serving traffic.
+    for discord_id in config.super_admin_discord_ids() {
         bootstrap_super_admin(&db_pool, discord_id).await?;
     }
 

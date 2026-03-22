@@ -233,8 +233,54 @@ async fn test_auth_me_returns_user_info() -> TestResult {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = parse_json(response).await?;
-    assert_eq!(body["user"]["discord_id"], did);
-    assert_eq!(body["user"]["role"], "member");
+    assert_eq!(body["discord_id"], did);
+    assert_eq!(body["role"], "member");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_auth_me_prefers_discord_avatar_over_profile_avatar() -> TestResult {
+    let pool = setup_pool().await?;
+    let did = unique_discord_id();
+    let user_id = create_test_user(&pool, &did, "member").await?;
+    let session = create_test_session(&pool, user_id).await?;
+
+    sqlx::query(
+        "UPDATE users SET avatar_url = $1 WHERE id = $2",
+    )
+    .bind("https://cdn.discordapp.com/avatars/test-user/test-hash.png")
+    .bind(user_id)
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO profiles (user_id, nickname, avatar_url, bio_markdown, bio_html, is_public) VALUES ($1, $2, $3, '', '', true)",
+    )
+    .bind(user_id)
+    .bind("ProfileNickname")
+    .bind("https://images.example.com/custom-avatar.png")
+    .execute(&pool)
+    .await?;
+
+    let app = build_app(pool)?;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/v1/internal/auth/me")
+                .header("Cookie", format!("session_id={session}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_json(response).await?;
+    assert_eq!(
+        body["avatar_url"],
+        "https://cdn.discordapp.com/avatars/test-user/test-hash.png"
+    );
+    assert_eq!(body["profile"]["nickname"], "ProfileNickname");
     Ok(())
 }
 
