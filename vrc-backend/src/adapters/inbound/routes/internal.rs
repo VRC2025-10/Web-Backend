@@ -83,26 +83,24 @@ struct ReportResponse {
 
 #[derive(Serialize)]
 struct MeResponse {
-    user: UserInfo,
-    has_profile: bool,
-    profile_summary: Option<ProfileSummary>,
-}
-
-#[derive(Serialize)]
-struct UserInfo {
     id: Uuid,
     discord_id: String,
+    discord_username: String,
     discord_display_name: String,
     discord_avatar_hash: Option<String>,
+    avatar_url: Option<String>,
     role: crate::domain::entities::user::UserRole,
     status: crate::domain::entities::user::UserStatus,
     joined_at: chrono::DateTime<Utc>,
+    profile: Option<MeProfile>,
 }
 
 #[derive(Serialize)]
-struct ProfileSummary {
+struct MeProfile {
     nickname: Option<String>,
-    avatar_url: Option<String>,
+    vrc_id: Option<String>,
+    x_id: Option<String>,
+    is_public: bool,
 }
 
 // ===== Event types =====
@@ -246,6 +244,7 @@ async fn get_me(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedUser<Member>,
 ) -> Result<Json<MeResponse>, ApiError> {
+    let user_avatar_url = auth.user.avatar_url.clone();
     let profile = sqlx::query_as!(
         crate::domain::entities::profile::Profile,
         r#"
