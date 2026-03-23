@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 
-use axum::extract::{FromRequestParts, Query};
+use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use serde::de::DeserializeOwned;
@@ -34,24 +34,22 @@ impl<S, T> FromRequestParts<S> for ValidatedQuery<T>
 where
     S: Send + Sync,
     T: DeserializeOwned + Send,
-    Query<T>: FromRequestParts<S>,
 {
     type Rejection = Response;
 
     fn from_request_parts(
         parts: &mut Parts,
-        state: &S,
+        _state: &S,
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
         async move {
-            let Query(query) = Query::<T>::from_request_parts(parts, state)
-                .await
-                .map_err(|_rejection| {
-                    ApiError::ValidationError(HashMap::from([(
-                        "query".to_owned(),
-                        "クエリパラメータが不正です".to_owned(),
-                    )]))
-                    .into_response()
-                })?;
+            let query_string = parts.uri.query().unwrap_or("");
+            let query: T = serde_qs::from_str(query_string).map_err(|_| {
+                ApiError::ValidationError(HashMap::from([(
+                    "query".to_owned(),
+                    "クエリパラメータが不正です".to_owned(),
+                )]))
+                .into_response()
+            })?;
 
             Ok(Self(query))
         }
