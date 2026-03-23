@@ -59,7 +59,7 @@
 
 | 変数名 | 必須 | デフォルト | 説明 |
 |--------|------|---------|------|
-| `SUPER_ADMIN_DISCORD_ID` | いいえ | なし | 起動時に super_admin ロールを付与する Discord ユーザー ID |
+| `SUPER_ADMIN_DISCORD_ID` | いいえ | なし | ログイン時に `super_admin` ロールを付与する Discord ユーザー ID |
 | `RUST_LOG` | いいえ | `vrc_backend=info,tower_http=info,sqlx=warn` | ログレベル設定（[EnvFilter 構文](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html)） |
 
 ## 最小構成例
