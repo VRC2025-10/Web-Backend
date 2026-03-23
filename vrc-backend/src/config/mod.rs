@@ -1,4 +1,5 @@
 use std::env;
+use std::path::PathBuf;
 
 use axum::http::HeaderValue;
 use reqwest::Url;
@@ -25,6 +26,8 @@ pub struct AppConfig {
     pub backend_base_url: String,
     pub frontend_origin: String,
     pub frontend_origin_header: HeaderValue,
+    pub gallery_storage_dir: PathBuf,
+    pub gallery_max_upload_bytes: usize,
 
     // Security
     pub session_secret: SecretString,
@@ -68,6 +71,14 @@ impl AppConfig {
             backend_base_url,
             frontend_origin,
             frontend_origin_header,
+            gallery_storage_dir: parse_path_env(
+                "GALLERY_STORAGE_DIR",
+                "/var/lib/vrc/gallery",
+            )?,
+            gallery_max_upload_bytes: parse_positive_usize_env(
+                "GALLERY_MAX_UPLOAD_BYTES",
+                10 * 1024 * 1024,
+            )?,
             session_secret: require_secret_env("SESSION_SECRET")?,
             system_api_token: require_secret_env("SYSTEM_API_TOKEN")?,
             session_max_age_secs: parse_positive_i64_env("SESSION_MAX_AGE_SECS", 604_800)?,
@@ -256,6 +267,46 @@ fn parse_positive_i64_env(key: &str, default: i64) -> Result<i64, ConfigError> {
             Ok(parsed)
         }
         None => Ok(default),
+    }
+}
+
+fn parse_positive_usize_env(key: &str, default: usize) -> Result<usize, ConfigError> {
+    match optional_env(key)? {
+        Some(value) => {
+            let parsed = value
+                .parse::<usize>()
+                .map_err(|error| ConfigError::InvalidEnv {
+                    key: key.to_owned(),
+                    value: value.clone(),
+                    reason: format!("must be a positive integer: {error}"),
+                })?;
+            if parsed == 0 {
+                return Err(ConfigError::InvalidEnv {
+                    key: key.to_owned(),
+                    value,
+                    reason: "must be greater than zero".to_owned(),
+                });
+            }
+            Ok(parsed)
+        }
+        None => Ok(default),
+    }
+}
+
+fn parse_path_env(key: &str, default: &str) -> Result<PathBuf, ConfigError> {
+    match optional_env(key)? {
+        Some(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Err(ConfigError::InvalidEnv {
+                    key: key.to_owned(),
+                    value,
+                    reason: "must not be empty".to_owned(),
+                });
+            }
+            Ok(PathBuf::from(trimmed))
+        }
+        None => Ok(PathBuf::from(default)),
     }
 }
 
@@ -585,6 +636,8 @@ mod tests {
             backend_base_url: "https://backend.example".to_owned(),
             frontend_origin: "https://frontend.example".to_owned(),
             frontend_origin_header: "https://frontend.example".parse().expect("valid header"),
+            gallery_storage_dir: std::env::temp_dir().join("vrc-gallery-test-config"),
+            gallery_max_upload_bytes: 10 * 1024 * 1024,
             session_secret: SecretString::from("abcdefghijklmnopqrstuvwxyz012345".to_owned()),
             system_api_token: SecretString::from(
                 "0123456789abcdefghijklmnopqrstuvwxyz".to_owned(),
