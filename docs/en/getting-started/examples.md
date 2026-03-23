@@ -221,7 +221,7 @@ curl -X POST \
 
 Admin endpoints require an authenticated session with admin privileges. Base path: `/api/v1/internal/admin`
 
-> **Note**: Your user account must have an admin role. Set `SUPER_ADMIN_DISCORD_ID` in `.env` to your Discord ID to bootstrap the first admin.
+> **Note**: Your user account must have an admin role. Set `SUPER_ADMIN_DISCORD_ID` in `.env` to your Discord ID, then sign in with that Discord account to grant the first `super_admin` role.
 
 ### List Users with Filters
 
