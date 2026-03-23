@@ -26,7 +26,7 @@
 | `SESSION_MAX_AGE_SECS` | i64 | `604800`（7日） | セッション有効期間（秒） |
 | `SESSION_CLEANUP_INTERVAL_SECS` | u64 | `3600`（1時間） | 期限切れセッション削除間隔（秒） |
 | `EVENT_ARCHIVAL_INTERVAL_SECS` | u64 | `86400`（1日） | イベント自動アーカイブ間隔（秒） |
-| `SUPER_ADMIN_DISCORD_ID` | String | なし | 起動時に super_admin として登録する Discord ID |
+| `SUPER_ADMIN_DISCORD_ID` | String | なし | ログイン時に `super_admin` を付与する対象の Discord ID |
 | `DISCORD_WEBHOOK_URL` | String | なし | Discord Webhook URL（通知用） |
 | `COOKIE_SECURE` | bool | `false` | Cookie に Secure フラグを付与（本番では `true`） |
 | `TRUST_X_FORWARDED_FOR` | bool | `false` | X-Forwarded-For ヘッダーを信頼（リバースプロキシ経由時 `true`） |
