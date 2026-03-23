@@ -12,7 +12,9 @@ use std::time::Duration;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderName, Method, header, HeaderValue};
+use axum::routing::get_service;
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
@@ -140,12 +142,19 @@ pub fn build_router(state: Arc<AppState>) -> Result<Router, RouteBuildError> {
     let router = Router::new()
         .merge(health::routes())
         .merge(metrics_endpoint::routes())
+        .nest_service(
+            "/gallery",
+            get_service(ServeDir::new(&state.config.gallery_storage_dir)),
+        )
         .nest("/api/v1/auth/discord", auth_routes)
         .nest("/api/v1/internal", internal_routes)
         .nest("/api/v1/public", public_routes)
         .nest("/api/v1/system", system_routes)
         // Global layers applied to all routes (outermost first in execution)
-        .layer(DefaultBodyLimit::max(1_048_576)) // 1 MB request body limit
+        .layer(DefaultBodyLimit::max(std::cmp::max(
+            25 * 1024 * 1024,
+            state.config.gallery_max_upload_bytes + 1_048_576,
+        )))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .layer(MetricsLayer)
