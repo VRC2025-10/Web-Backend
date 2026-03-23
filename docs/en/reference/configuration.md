@@ -128,7 +128,7 @@ SYSTEM_API_TOKEN=your_system_api_token_at_least_64_characters_long_generate_with
 | ✅ Strong session secret | `SESSION_SECRET` | ≥ 32 chars, generated with CSPRNG |
 | ✅ Strong API token | `SYSTEM_API_TOKEN` | ≥ 64 chars, generated with CSPRNG |
 | ✅ Correct frontend origin | `FRONTEND_ORIGIN` | Production frontend URL (no trailing slash) |
-| ✅ Super admin configured | `SUPER_ADMIN_DISCORD_ID` | Discord ID of the initial admin |
+| ✅ Super admin configured | `SUPER_ADMIN_DISCORD_ID` | Discord ID allowed to receive the initial `super_admin` role on login |
 
 ---
 
