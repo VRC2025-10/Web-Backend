@@ -8,7 +8,7 @@ use axum_extra::extract::CookieJar;
 use axum_extra::extract::cookie::Cookie;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use hmac::{Hmac, Mac};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -145,7 +145,7 @@ async fn login(
     );
 
     let discord_url = format!(
-        "https://discord.com/oauth2/authorize?client_id={}&redirect_uri={}&response_type=code&scope=identify+guilds&state={}",
+        "https://discord.com/oauth2/authorize?client_id={}&redirect_uri={}&response_type=code&scope=identify+guilds+guilds.members.read&state={}",
         state.config.discord_client_id,
         urlencoding::encode(&callback_url),
         urlencoding::encode(&state_token)
@@ -261,6 +261,17 @@ async fn callback(
         return Ok(error_redirect("not_member"));
     }
 
+    let guild_member = discord
+        .get_current_guild_member(&token_response.access_token, &state.config.discord_guild_id)
+        .await;
+    let guild_member = match guild_member {
+        Ok(guild_member) => guild_member,
+        Err(error) => {
+            tracing::error!(error = %error, "Discord get guild member failed");
+            return Ok(error_redirect("discord_error"));
+        }
+    };
+
     // 5. Upsert user
     let avatar_url = discord_user.avatar_url();
     let is_super_admin = state.config.is_super_admin_discord_id(&discord_user.id);
@@ -335,15 +346,37 @@ async fn callback(
     #[allow(clippy::cast_precision_loss)]
     let max_age_f64 = state.config.session_max_age_secs as f64;
 
-    let session_creation = sqlx::query!(
+    let discord_token_expires_at = Utc::now() + Duration::seconds(token_response.expires_in);
+
+    let session_creation = sqlx::query(
         r#"
-        INSERT INTO sessions (user_id, token_hash, expires_at)
-        VALUES ($1, $2, NOW() + make_interval(secs => $3::double precision))
+        INSERT INTO sessions (
+            user_id,
+            token_hash,
+            expires_at,
+            discord_access_token,
+            discord_refresh_token,
+            discord_token_expires_at,
+            discord_role_ids
+        )
+        VALUES (
+            $1,
+            $2,
+            NOW() + make_interval(secs => $3::double precision),
+            $4,
+            $5,
+            $6,
+            $7
+        )
         "#,
-        user.id,
-        &token_hash[..],
-        max_age_f64
     )
+    .bind(user.id)
+    .bind(&token_hash[..])
+    .bind(max_age_f64)
+    .bind(&token_response.access_token)
+    .bind(token_response.refresh_token.as_deref())
+    .bind(discord_token_expires_at)
+    .bind(&guild_member.roles)
     .execute(&state.db_pool)
     .await;
     if let Err(error) = session_creation {
