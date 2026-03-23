@@ -1,14 +1,23 @@
 services:
   app:
-    image: "${VRC_BACKEND_IMAGE:-vrc-backend:latest}"
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: "${VRC_BACKEND_IMAGE:-vrc-backend:local}"
+    pull_policy: build
     container_name: vrc-backend
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:3000:3000"
     env_file:
       - .env
     environment:
       - RUST_LOG=vrc_backend=info,tower_http=info,sqlx=warn
+      - BIND_ADDRESS=0.0.0.0:3000
+      - BACKEND_BASE_URL=https://vrcapi.arivell-vm.com
+      - DATABASE_URL=postgres://${POSTGRES_USER:-vrc_app}:${POSTGRES_PASSWORD:-change-me}@db:5432/${POSTGRES_DB:-vrc_class_reunion}
+      - FRONTEND_ORIGIN=https://vrc10.arivell-vm.com
+      - DISCORD_REDIRECT_URI=https://vrcapi.arivell-vm.com/api/v1/auth/discord/callback
+      - COOKIE_SECURE=true
+      - TRUST_X_FORWARDED_FOR=true
     depends_on:
       db:
         condition: service_healthy
@@ -17,22 +26,45 @@ services:
     networks:
       - internal
 
+  frontend:
+    build:
+      context: ../Web-Frontend
+      dockerfile: Dockerfile
+      args:
+        INTERNAL_API_URL: http://app:3000
+        NEXT_PUBLIC_API_URL: https://vrcapi.arivell-vm.com
+        NEXT_PUBLIC_SITE_URL: https://vrc10.arivell-vm.com
+        FRONTEND_ORIGIN: https://vrc10.arivell-vm.com
+    image: "${VRC_FRONTEND_IMAGE:-vrc-frontend:local}"
+    pull_policy: build
+    container_name: vrc-frontend
+    restart: unless-stopped
+    environment:
+      - INTERNAL_API_URL=http://app:3000
+      - NEXT_PUBLIC_API_URL=https://vrcapi.arivell-vm.com
+      - NEXT_PUBLIC_SITE_URL=https://vrc10.arivell-vm.com
+      - FRONTEND_ORIGIN=https://vrc10.arivell-vm.com
+      - NODE_ENV=production
+    depends_on:
+      app:
+        condition: service_started
+    networks:
+      - internal
+
   db:
     image: postgres:16-bookworm
     container_name: vrc-db
     restart: unless-stopped
     environment:
-      POSTGRES_DB: vrc_class_reunion
-      POSTGRES_USER: vrc_app
-      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
-    secrets:
-      - db_password
+      POSTGRES_DB: ${POSTGRES_DB:-vrc_class_reunion}
+      POSTGRES_USER: ${POSTGRES_USER:-vrc_app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
       - "127.0.0.1:5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U vrc_app -d vrc_class_reunion"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vrc_app} -d ${POSTGRES_DB:-vrc_class_reunion}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -63,10 +95,15 @@ services:
       - "443:443/udp"  # HTTP/3 QUIC
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./secrets/cloudflare-origin.crt:/etc/caddy/certs/cloudflare-origin.crt:ro
+      - ./secrets/cloudflare-origin.key:/etc/caddy/certs/cloudflare-origin.key:ro
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
-      - app
+      app:
+        condition: service_started
+      frontend:
+        condition: service_healthy
     networks:
       - internal
 
@@ -79,10 +116,6 @@ volumes:
     driver: local
   caddy_config:
     driver: local
-
-secrets:
-  db_password:
-    file: ./secrets/db_password.txt
 
 networks:
   internal:
