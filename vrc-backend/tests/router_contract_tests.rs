@@ -36,6 +36,8 @@ fn test_config() -> AppConfig {
         backend_base_url: "https://backend.example".to_owned(),
         frontend_origin: "https://frontend.example".to_owned(),
         frontend_origin_header: "https://frontend.example".parse().expect("valid header"),
+        gallery_storage_dir: std::env::temp_dir().join("vrc-gallery-test-router"),
+        gallery_max_upload_bytes: 10 * 1024 * 1024,
         session_secret: SecretString::from("abcdefghijklmnopqrstuvwxyz012345".to_owned()),
         system_api_token: SecretString::from(
             "0123456789abcdefghijklmnopqrstuvwxyz".to_owned(),
