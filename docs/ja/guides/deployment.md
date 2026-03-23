@@ -6,153 +6,122 @@
 
 ## 概要
 
-VRC Web-Backend は単一の Proxmox VM 上で Docker Compose スタックとして実行されます。本番スタックは3つのサービスで構成: Rust バックエンド、PostgreSQL、Caddy（自動 TLS 付きリバースプロキシ）。
+VRC Web-Backend は単一の Proxmox VM 上で Docker Compose スタックとして実行されます。本番スタックは 4 つのサービスで構成されます。
 
-## デプロイメントトポロジー
+- Rust バックエンド
+- Next.js フロントエンド
+- PostgreSQL
+- Caddy
 
-```mermaid
-graph TD
-    subgraph "インターネット"
-        Users["ユーザー<br/>(HTTPS)"]
-        GAS["Google Apps Script<br/>(HTTPS)"]
-        Bot["Discord Bot<br/>(HTTPS)"]
-    end
-
-    subgraph "Proxmox VM"
-        subgraph "Docker Compose スタック"
-            Caddy["Caddy 2<br/>:443 (HTTPS)<br/>:80 (リダイレクト)<br/>自動 TLS + HTTP/3"]
-            App["VRC Backend<br/>:3000 (HTTP)<br/>Rust/Axum"]
-            DB[("PostgreSQL 16<br/>:5432<br/>永続ボリューム")]
-        end
-    end
-
-    subgraph "外部"
-        Discord["Discord API"]
-    end
-
-    Users -->|"HTTPS :443"| Caddy
-    GAS -->|"HTTPS :443"| Caddy
-    Bot -->|"HTTPS :443"| Caddy
-
-    Caddy -->|"HTTP :3000"| App
-    App -->|"TCP :5432"| DB
-    App -->|"HTTPS"| Discord
-
-    style Caddy fill:#1F88E5,color:white
-    style App fill:#4CAF50,color:white
-    style DB fill:#FF9800,color:white
-```
+Caddy は Cloudflare のプロキシ配下で動作し、Cloudflare Origin CA 証明書でオリジン TLS を終端します。
 
 ## 前提条件
 
-- Proxmox VM（または任意の Linux サーバー）:
-  - Docker Engine ≥ 24.0
-  - Docker Compose ≥ 2.20
-  - 2GB 以上の RAM
-  - 20GB 以上のディスク
-- サーバーの IP アドレスを指すドメイン名
-- Discord アプリケーション設定済み（[設定ガイド](configuration.md)参照）
+- Proxmox VM または任意の Linux サーバー
+- Docker Engine 24 以上
+- Docker Compose 2.20 以上
+- `vrcapi.arivell-vm.com` と `vrc10.arivell-vm.com` がサーバー IP を向いていること
+- Cloudflare 側で両方の DNS レコードをプロキシ有効にしていること
+- Cloudflare の SSL/TLS モードが `Full (strict)` であること
+- Discord アプリケーションが設定済みであること
 
 ## シークレット管理
 
-シークレットディレクトリを作成しシークレットを生成:
+本番では `secrets/` 配下に以下を配置します。
 
 ```bash
 mkdir -p secrets
 
-# データベースパスワード
 openssl rand -base64 32 > secrets/db_password.txt
-
-# セッションシークレット（最低64文字の16進文字列）
 openssl rand -hex 64 > secrets/session_secret.txt
-
-# システム API トークン（最低64文字の16進文字列）
 openssl rand -hex 64 > secrets/system_api_token.txt
 
-# パーミッション制限
-chmod 600 secrets/*.txt
+# Cloudflare Dashboard > SSL/TLS > Origin Server の値を保存
+cat > secrets/cloudflare-origin.crt << 'EOF'
+-----BEGIN CERTIFICATE-----
+...
+-----END CERTIFICATE-----
+EOF
+
+cat > secrets/cloudflare-origin.key << 'EOF'
+-----BEGIN PRIVATE KEY-----
+...
+-----END PRIVATE KEY-----
+EOF
+
+chmod 600 secrets/*
 ```
 
-> **重要**: `secrets/` ディレクトリはバージョン管理にコミットしないでください。`.gitignore` に追加してください。
+> **重要**: `secrets/` はコミットしません。`.gitignore` で除外してください。
 
-## デプロイ手順
-
-### 初回デプロイ
+## 初回デプロイ
 
 ```bash
-# 1. リポジトリのクローン
 git clone <repo-url> /opt/vrc-backend
 cd /opt/vrc-backend
 
-# 2. シークレット作成
 mkdir -p secrets
 openssl rand -base64 32 > secrets/db_password.txt
 openssl rand -hex 64 > secrets/session_secret.txt
 openssl rand -hex 64 > secrets/system_api_token.txt
-chmod 600 secrets/*.txt
+chmod 600 secrets/*
 
-# 3. Discord 認証情報の .env ファイル作成
 cat > .env << 'EOF'
 DISCORD_CLIENT_ID=your_client_id
 DISCORD_CLIENT_SECRET=your_client_secret
 DISCORD_GUILD_ID=your_guild_id
-DISCORD_REDIRECT_URI=https://api.your-domain.com/api/v1/auth/callback
-FRONTEND_ORIGIN=https://your-domain.com
+BACKEND_BASE_URL=https://vrcapi.arivell-vm.com
+DISCORD_REDIRECT_URI=https://vrcapi.arivell-vm.com/api/v1/auth/discord/callback
+FRONTEND_ORIGIN=https://vrc10.arivell-vm.com
+COOKIE_SECURE=true
+TRUST_X_FORWARDED_FOR=true
 EOF
 
-# 4. ビルドと起動
-docker compose -f docker-compose.prod.yml build
 docker compose -f docker-compose.prod.yml up -d
-
-# 5. データベースマイグレーション実行
-docker compose -f docker-compose.prod.yml exec app ./vrc-backend migrate
-
-# 6. ヘルスチェック
-curl -s https://api.your-domain.com/api/v1/public/health | jq .
+curl -s https://vrcapi.arivell-vm.com/health | jq .
 ```
 
-### アップデート（以降のデプロイ）
+補足:
+
+- `app` と `frontend` は `up -d` 時に自動ビルドされます
+- バックエンドは起動時に自動で DB マイグレーションを実行します
+- Cloudflare の WAF や Bot Fight Mode で Discord の OAuth コールバックを遮断しないでください
+
+## アップデート
 
 ```bash
 cd /opt/vrc-backend
-
-# 1. 最新コードを pull
 git pull origin main
-
-# 2. リビルドと再起動
-docker compose -f docker-compose.prod.yml build
 docker compose -f docker-compose.prod.yml up -d
-
-# 3. 新しいマイグレーション実行
-docker compose -f docker-compose.prod.yml exec app ./vrc-backend migrate
-
-# 4. ヘルスチェック
-curl -s https://api.your-domain.com/api/v1/public/health | jq .
+curl -s https://vrcapi.arivell-vm.com/health | jq .
 ```
 
 ## Caddy 設定
 
-Caddyfile で自動 TLS、HTTP/3、リバースプロキシを構成:
+現在の Caddyfile は Cloudflare Origin CA を使う前提です。
 
 ```caddyfile
-api.your-domain.com {
+(cloudflare_origin_tls) {
+    tls /etc/caddy/certs/cloudflare-origin.crt /etc/caddy/certs/cloudflare-origin.key
+}
+
+vrcapi.arivell-vm.com {
+    import cloudflare_origin_tls
     reverse_proxy app:3000
+}
 
-    header {
-        -Server
-    }
-
-    log {
-        output file /var/log/caddy/access.log
-    }
+vrc10.arivell-vm.com {
+    import cloudflare_origin_tls
+    reverse_proxy frontend:3000
 }
 ```
 
-Caddy は自動的に:
-- Let's Encrypt 経由で TLS 証明書を取得・更新
-- HTTP を HTTPS にリダイレクト
-- HTTP/3 (QUIC) を有効化
-- TLS 終端を処理
+Caddy の役割:
+
+- Cloudflare Origin CA 証明書でオリジン TLS を終端
+- HTTP から HTTPS へのリダイレクト
+- HTTP/3 の有効化
+- `app` と `frontend` へのリバースプロキシ
 
 ## 関連ドキュメント
 
