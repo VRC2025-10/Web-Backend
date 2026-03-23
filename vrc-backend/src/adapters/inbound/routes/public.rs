@@ -11,6 +11,7 @@ use uuid::Uuid;
 use crate::AppState;
 use crate::adapters::inbound::extractors::ValidatedQuery;
 use crate::domain::entities::event::EventStatus;
+use crate::domain::entities::gallery::GalleryTargetType;
 use crate::domain::value_objects::pagination::{PageRequest, PageResponse};
 use crate::errors::api::ApiError;
 
@@ -73,9 +74,25 @@ struct PublicMemberDetail {
 
 #[derive(serde::Deserialize)]
 struct EventListQuery {
-    #[serde(flatten)]
-    page: PageRequest,
+    #[serde(default = "default_page")]
+    page: u32,
+    #[serde(default = "default_per_page")]
+    per_page: u32,
     status: Option<EventStatus>,
+}
+
+fn default_page() -> u32 { 1 }
+fn default_per_page() -> u32 { 20 }
+
+impl EventListQuery {
+    fn page_request(&self) -> Result<PageRequest, ApiError> {
+        PageRequest::new(self.page, self.per_page).ok_or_else(|| {
+            ApiError::ValidationError(std::collections::HashMap::from([(
+                "pagination".to_owned(),
+                "page must be >= 1 and per_page must be between 1 and 100".to_owned(),
+            )]))
+        })
+    }
 }
 
 #[derive(Serialize)]
@@ -99,6 +116,7 @@ struct ClubSummary {
     id: Uuid,
     name: String,
     description_html: Option<String>,
+    cover_image_url: Option<String>,
     owner: UserBrief,
     member_count: i64,
     created_at: DateTime<Utc>,
@@ -117,6 +135,7 @@ struct ClubDetail {
     id: Uuid,
     name: String,
     description_html: Option<String>,
+    cover_image_url: Option<String>,
     owner: UserBrief,
     members: Vec<ClubMemberInfo>,
     created_at: DateTime<Utc>,
@@ -164,6 +183,7 @@ struct ClubListRow {
     id: Uuid,
     name: String,
     description_html: Option<String>,
+    cover_image_url: Option<String>,
     owner_discord_id: String,
     owner_display_name: String,
     member_count: i64,
@@ -174,6 +194,7 @@ struct ClubDetailRow {
     id: Uuid,
     name: String,
     description_html: Option<String>,
+    cover_image_url: Option<String>,
     owner_discord_id: String,
     owner_display_name: String,
     created_at: DateTime<Utc>,
@@ -186,6 +207,7 @@ struct ClubMemberRow {
     joined_at: DateTime<Utc>,
 }
 
+#[derive(sqlx::FromRow)]
 struct GalleryRow {
     id: Uuid,
     image_url: String,
@@ -202,7 +224,7 @@ async fn list_members(
     State(state): State<Arc<AppState>>,
     ValidatedQuery(page): ValidatedQuery<PageRequest>,
 ) -> Result<PageResponse<PublicMemberSummary>, ApiError> {
-    let rows = sqlx::query_as!(
+    let rows_future = sqlx::query_as!(
         MemberRow,
         r#"
         SELECT u.discord_id, u.discord_display_name, u.discord_avatar_hash,
@@ -217,11 +239,9 @@ async fn list_members(
         page.limit(),
         page.offset()
     )
-    .fetch_all(&state.db_pool)
-    .await
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    .fetch_all(&state.db_pool);
 
-    let count = sqlx::query_scalar!(
+    let count_future = sqlx::query_scalar!(
         r#"
         SELECT COUNT(*) as "count!: i64"
         FROM users u
@@ -229,9 +249,10 @@ async fn list_members(
         WHERE u.status = 'active'
         "#,
     )
-    .fetch_one(&state.db_pool)
-    .await
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    .fetch_one(&state.db_pool);
+
+    let (rows, count) = tokio::try_join!(rows_future, count_future)
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     let items: Vec<PublicMemberSummary> = rows
         .into_iter()
@@ -326,6 +347,7 @@ async fn list_events(
     ValidatedQuery(query): ValidatedQuery<EventListQuery>,
 ) -> Result<PageResponse<EventSummary>, ApiError> {
     let now = Utc::now();
+    let page = query.page_request()?;
 
     // Public events only show published (or optionally filtered)
     let events = sqlx::query_as!(
@@ -340,8 +362,8 @@ async fn list_events(
         LIMIT $2 OFFSET $3
         "#,
         query.status as Option<EventStatus>,
-        query.page.limit(),
-        query.page.offset()
+        page.limit(),
+        page.offset()
     )
     .fetch_all(&state.db_pool)
     .await
@@ -398,7 +420,7 @@ async fn list_events(
         })
         .collect();
 
-    Ok(PageResponse::new(items, count, query.page.per_page()))
+    Ok(PageResponse::new(items, count, page.per_page()))
 }
 
 #[vrc_macros::handler(method = GET, path = "/api/v1/public/events/{event_id}", summary = "Get public event")]
@@ -461,7 +483,7 @@ async fn list_clubs(
     let rows = sqlx::query_as!(
         ClubListRow,
         r#"
-        SELECT c.id, c.name, c.description_html,
+         SELECT c.id, c.name, c.description_html, c.cover_image_url,
                u.discord_id as owner_discord_id,
                u.discord_display_name as owner_display_name,
                COUNT(cm.user_id) as "member_count!: i64",
@@ -469,7 +491,7 @@ async fn list_clubs(
         FROM clubs c
         JOIN users u ON u.id = c.owner_user_id
         LEFT JOIN club_members cm ON cm.club_id = c.id
-        GROUP BY c.id, c.name, c.description_html, u.discord_id, u.discord_display_name, c.created_at
+         GROUP BY c.id, c.name, c.description_html, c.cover_image_url, u.discord_id, u.discord_display_name, c.created_at
         ORDER BY c.name
         LIMIT $1 OFFSET $2
         "#,
@@ -491,6 +513,7 @@ async fn list_clubs(
             id: r.id,
             name: r.name,
             description_html: r.description_html,
+            cover_image_url: r.cover_image_url,
             owner: UserBrief {
                 user_id: r.owner_discord_id,
                 discord_display_name: r.owner_display_name,
@@ -511,7 +534,7 @@ async fn get_club(
     let row = sqlx::query_as!(
         ClubDetailRow,
         r#"
-        SELECT c.id, c.name, c.description_html,
+        SELECT c.id, c.name, c.description_html, c.cover_image_url,
                u.discord_id as owner_discord_id,
                u.discord_display_name as owner_display_name,
                c.created_at
@@ -545,6 +568,7 @@ async fn get_club(
         id: row.id,
         name: row.name,
         description_html: row.description_html,
+        cover_image_url: row.cover_image_url,
         owner: UserBrief {
             user_id: row.owner_discord_id,
             discord_display_name: row.owner_display_name,
@@ -581,8 +605,7 @@ async fn list_gallery(
         return Err(ApiError::ClubNotFound);
     }
 
-    let rows = sqlx::query_as!(
-        GalleryRow,
+    let rows = sqlx::query_as::<_, GalleryRow>(
         r#"
         SELECT g.id, g.image_url, g.caption,
                u.discord_id as uploader_discord_id,
@@ -590,26 +613,28 @@ async fn list_gallery(
                g.created_at
         FROM gallery_images g
         JOIN users u ON u.id = g.uploaded_by_user_id
-        WHERE g.club_id = $1 AND g.status = 'approved'
+        WHERE g.club_id = $1 AND g.status = 'approved' AND g.target_type = $2
         ORDER BY g.created_at DESC
-        LIMIT $2 OFFSET $3
+        LIMIT $3 OFFSET $4
         "#,
-        club_id,
-        page.limit(),
-        page.offset()
     )
+    .bind(club_id)
+    .bind(GalleryTargetType::Club)
+    .bind(page.limit())
+    .bind(page.offset())
     .fetch_all(&state.db_pool)
     .await
     .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    let count = sqlx::query_scalar!(
+    let count = sqlx::query_scalar::<_, i64>(
         r#"
-        SELECT COUNT(*) as "count!: i64"
+        SELECT COUNT(*)
         FROM gallery_images
-        WHERE club_id = $1 AND status = 'approved'
+        WHERE club_id = $1 AND status = 'approved' AND target_type = $2
         "#,
-        club_id
     )
+    .bind(club_id)
+    .bind(GalleryTargetType::Club)
     .fetch_one(&state.db_pool)
     .await
     .map_err(|e| ApiError::Internal(e.to_string()))?;
