@@ -218,7 +218,7 @@ DISCORD_GUILD_ID=987654321098765432
 | `SESSION_MAX_AGE_SECS` | `604800` (7 days) | Session lifetime |
 | `SESSION_CLEANUP_INTERVAL_SECS` | `3600` (1 hour) | Expired session cleanup interval |
 | `EVENT_ARCHIVAL_INTERVAL_SECS` | `86400` (1 day) | Event archival task interval |
-| `SUPER_ADMIN_DISCORD_ID` | — | Discord ID for the super admin user |
+| `SUPER_ADMIN_DISCORD_ID` | — | Discord ID allowed to receive the `super_admin` role on login |
 | `DISCORD_WEBHOOK_URL` | — | Discord webhook for notifications |
 | `COOKIE_SECURE` | `false` | Set `true` in production (HTTPS) |
 | `TRUST_X_FORWARDED_FOR` | `false` | Set `true` behind a reverse proxy |
