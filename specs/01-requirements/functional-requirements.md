@@ -11,7 +11,7 @@
 | FR-AUTH-005 | Session cleanup runs on a configurable interval | Background Tokio task deletes expired sessions every `SESSION_CLEANUP_INTERVAL_SECS` (default 3600) |
 | FR-AUTH-006 | `GET /auth/me` returns current user info or 401 | Response includes user ID, Discord username, avatar URL, role, and profile summary (nullable) |
 | FR-AUTH-007 | `POST /auth/logout` destroys session and clears cookie | Server deletes session row from DB, response sets `session_id` cookie with `Max-Age=0` |
-| FR-AUTH-008 | SuperAdmin bootstrap via `SUPER_ADMIN_DISCORD_ID` env var | On startup, if env var is set, upsert user with `super_admin` role and dummy profile |
+| FR-AUTH-008 | SuperAdmin elevation via `SUPER_ADMIN_DISCORD_ID` env var | If env var is set, a matching Discord user receives `super_admin` when they successfully log in; the server must not create placeholder users at startup |
 
 ## Profile Management
 
