@@ -107,9 +107,25 @@ struct MeProfile {
 
 #[derive(Deserialize)]
 struct EventListQuery {
-    #[serde(flatten)]
-    page: PageRequest,
+    #[serde(default = "default_page")]
+    page: u32,
+    #[serde(default = "default_per_page")]
+    per_page: u32,
     status: Option<EventStatus>,
+}
+
+fn default_page() -> u32 { 1 }
+fn default_per_page() -> u32 { 20 }
+
+impl EventListQuery {
+    fn page_request(&self) -> Result<PageRequest, ApiError> {
+        PageRequest::new(self.page, self.per_page).ok_or_else(|| {
+            ApiError::ValidationError(std::collections::HashMap::from([(
+                "pagination".to_owned(),
+                "page must be >= 1 and per_page must be between 1 and 100".to_owned(),
+            )]))
+        })
+    }
 }
 
 #[derive(Serialize)]
@@ -258,24 +274,25 @@ async fn get_me(
     .await
     .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    let has_profile = profile.is_some();
-    let profile_summary = profile.map(|p| ProfileSummary {
-        nickname: p.nickname,
-        avatar_url: p.avatar_url,
+    let avatar_url = user_avatar_url.or_else(|| profile.as_ref().and_then(|item| item.avatar_url.clone()));
+    let profile = profile.map(|item| MeProfile {
+        nickname: item.nickname,
+        vrc_id: item.vrc_id,
+        x_id: item.x_id,
+        is_public: item.is_public,
     });
 
     Ok(Json(MeResponse {
-        user: UserInfo {
-            id: auth.user.id,
-            discord_id: auth.user.discord_id,
-            discord_display_name: auth.user.discord_display_name,
-            discord_avatar_hash: auth.user.discord_avatar_hash,
-            role: auth.user.role,
-            status: auth.user.status,
-            joined_at: auth.user.joined_at,
-        },
-        has_profile,
-        profile_summary,
+        id: auth.user.id,
+        discord_id: auth.user.discord_id,
+        discord_username: auth.user.discord_username,
+        discord_display_name: auth.user.discord_display_name,
+        discord_avatar_hash: auth.user.discord_avatar_hash,
+        avatar_url,
+        role: auth.user.role,
+        status: auth.user.status,
+        joined_at: auth.user.joined_at,
+        profile,
     }))
 }
 
@@ -333,19 +350,35 @@ async fn get_my_profile(
     )
     .fetch_optional(&state.db_pool)
     .await
-    .map_err(|e| ApiError::Internal(e.to_string()))?
-    .ok_or(ApiError::ProfileNotFound)?;
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    Ok(Json(OwnProfile {
-        nickname: profile.nickname,
-        vrc_id: profile.vrc_id,
-        x_id: profile.x_id,
-        bio_markdown: none_if_empty(profile.bio_markdown),
-        bio_html: none_if_empty(profile.bio_html),
-        avatar_url: profile.avatar_url,
-        is_public: profile.is_public,
-        updated_at: profile.updated_at,
-    }))
+    let response = if let Some(profile) = profile {
+        OwnProfile {
+            nickname: profile.nickname,
+            vrc_id: profile.vrc_id,
+            x_id: profile.x_id,
+            bio_markdown: none_if_empty(profile.bio_markdown),
+            bio_html: none_if_empty(profile.bio_html),
+            avatar_url: profile.avatar_url,
+            is_public: profile.is_public,
+            updated_at: profile.updated_at,
+        }
+    } else {
+        // First-time users may exist before creating any editable profile data.
+        // Return an empty profile payload so the editor can render instead of 404.
+        OwnProfile {
+            nickname: None,
+            vrc_id: None,
+            x_id: None,
+            bio_markdown: Some(String::new()),
+            bio_html: Some(String::new()),
+            avatar_url: None,
+            is_public: false,
+            updated_at: Utc::now(),
+        }
+    };
+
+    Ok(Json(response))
 }
 
 #[vrc_macros::handler(method = PUT, path = "/api/v1/internal/me/profile", role = Member, rate_limit = "internal", summary = "Update own profile")]
@@ -425,6 +458,7 @@ async fn list_events(
     _auth: AuthenticatedUser<Member>,
     ValidatedQuery(query): ValidatedQuery<EventListQuery>,
 ) -> Result<PageResponse<EventSummary>, ApiError> {
+    let page = query.page_request()?;
     let now = Utc::now();
 
     let events = sqlx::query_as!(
@@ -439,8 +473,8 @@ async fn list_events(
         LIMIT $2 OFFSET $3
         "#,
         query.status as Option<EventStatus>,
-        query.page.limit(),
-        query.page.offset()
+        page.limit(),
+        page.offset()
     )
     .fetch_all(&state.db_pool)
     .await
@@ -498,7 +532,7 @@ async fn list_events(
         })
         .collect();
 
-    Ok(PageResponse::new(items, count, query.page.per_page()))
+    Ok(PageResponse::new(items, count, page.per_page()))
 }
 
 #[allow(clippy::too_many_lines)] // Multi-step report with target validation
