@@ -21,13 +21,13 @@ cp .env.example .env
 | `DATABASE_URL` | PostgreSQL 接続 URL | `postgres://user:pass@host:port/db` |
 | `DISCORD_CLIENT_ID` | Discord OAuth2 クライアント ID | — |
 | `DISCORD_CLIENT_SECRET` | Discord OAuth2 クライアントシークレット | — |
-| `DISCORD_REDIRECT_URI` | OAuth2 コールバック URL | 例: `http://localhost:8080/api/v1/auth/discord/callback` |
+| `DISCORD_REDIRECT_URI` | OAuth2 コールバック URL | 例: `https://vrcapi.arivell-vm.com/api/v1/auth/discord/callback` |
 | `DISCORD_BOT_TOKEN` | Discord Bot トークン | — |
 | `DISCORD_GUILD_ID` | 対象ギルド ID | — |
 | `DISCORD_WEBHOOK_URL` | 通知用 Webhook URL | — |
 | `SYSTEM_API_TOKEN` | System API 認証トークン | **最低64文字** |
 | `SESSION_SECRET` | セッション署名シークレット | **最低32文字** |
-| `FRONTEND_ORIGIN` | フロントエンド URL | 例: `http://localhost:3000` |
+| `FRONTEND_ORIGIN` | フロントエンド URL | 例: `https://vrc10.arivell-vm.com` |
 
 ### オプション
 
@@ -40,7 +40,7 @@ cp .env.example .env
 | `SESSION_CLEANUP_INTERVAL_SECS` | `3600` | 期限切れセッション掃除間隔（秒） |
 | `MEMBER_SYNC_INTERVAL_SECS` | `3600` | メンバー同期間隔（秒） |
 | `EVENT_ARCHIVE_INTERVAL_SECS` | `86400` | イベントアーカイブ間隔（秒） |
-| `SUPER_ADMIN_DISCORD_ID` | *(なし)* | SuperAdmin として自動作成するユーザーの Discord ID。複数指定時はカンマ区切り |
+| `SUPER_ADMIN_DISCORD_ID` | *(なし)* | ログイン時に `super_admin` を付与する Discord ID。複数指定時はカンマ区切り |
 
 ## トークンの生成方法
 
@@ -87,13 +87,14 @@ sqlx migrate run
 # 12: gallery_images テーブル + gallery_image_status ENUM
 ```
 
-### SuperAdmin の自動作成 (Bootstrap)
+### SuperAdmin の初回昇格
 
-環境変数 `SUPER_ADMIN_DISCORD_ID` が設定されている場合、サーバー起動時に自動的に SuperAdmin ユーザーが作成されます。複数人を指定する場合はカンマ区切りで設定できます。
+環境変数 `SUPER_ADMIN_DISCORD_ID` が設定されている場合、その Discord ID で実際にログインしたユーザーが `super_admin` に昇格します。複数人を指定する場合はカンマ区切りで設定できます。
 
-- 指定された Discord ID を持つユーザーが DB に存在しなければ、ダミー名（`システム管理者`）で `users` と `profiles` レコードを自動作成し、ロールを `super_admin` に設定
-- 既にユーザーが存在する場合は、ロールを `super_admin` に昇格
-- 該当の Discord アカウントで実際にログインすると、既存レコードとセッションが紐付き、プロフィールを自由に編集可能
+- サーバー起動時にダミーの `users` / `profiles` レコードは作成しません
+- 指定された Discord ID のユーザーが OAuth コールバックでログインしたタイミングで、`super_admin` ロールが付与されます
+- 既にユーザーが存在する場合は、その既存レコードが `super_admin` に昇格します
+- 旧バージョンが作った未使用のダミー SuperAdmin レコードは、起動時に安全条件を満たす場合のみ自動削除されます
 
 ```bash
 # .env に追加
