@@ -85,6 +85,21 @@ fn expired_oauth_state_cookie(secure: bool) -> Cookie<'static> {
         .build()
 }
 
+fn map_login_error_code(reason: &str) -> &'static str {
+    match reason {
+        "invalid_state" | "expired" | "csrf" => "csrf_failed",
+        "not_member" => "not_guild_member",
+        "discord_error" => "discord_error",
+        "suspended" => "suspended",
+        _ => "auth_failed",
+    }
+}
+
+fn build_login_error_redirect_url(frontend_origin: &str, reason: &str) -> String {
+    let error_code = map_login_error_code(reason);
+    format!("{frontend_origin}/login?error={error_code}")
+}
+
 #[vrc_macros::handler(method = GET, path = "/api/v1/auth/discord/login", rate_limit = "auth", summary = "Start Discord OAuth login")]
 async fn login(
     State(state): State<Arc<AppState>>,
@@ -149,7 +164,7 @@ async fn callback(
     let frontend = &state.config.frontend_origin;
     let cookie_secure = state.config.cookie_secure;
     let error_redirect = |reason: &str| -> Response {
-        let url = format!("{frontend}/auth/error?reason={reason}");
+        let url = build_login_error_redirect_url(frontend, reason);
         (
             jar.clone()
                 .remove(expired_oauth_state_cookie(cookie_secure)),
@@ -478,6 +493,25 @@ mod tests {
             Some(axum_extra::extract::cookie::SameSite::Lax)
         );
         assert_eq!(cookie.max_age(), Some(time::Duration::ZERO));
+    }
+
+    #[test]
+    fn test_map_login_error_code_normalizes_callback_failures() {
+        assert_eq!(map_login_error_code("invalid_state"), "csrf_failed");
+        assert_eq!(map_login_error_code("expired"), "csrf_failed");
+        assert_eq!(map_login_error_code("csrf"), "csrf_failed");
+        assert_eq!(map_login_error_code("not_member"), "not_guild_member");
+        assert_eq!(map_login_error_code("discord_error"), "discord_error");
+        assert_eq!(map_login_error_code("suspended"), "suspended");
+        assert_eq!(map_login_error_code("unexpected"), "auth_failed");
+    }
+
+    #[test]
+    fn test_build_login_error_redirect_url_targets_existing_login_route() {
+        assert_eq!(
+            build_login_error_redirect_url("https://frontend.example", "not_member"),
+            "https://frontend.example/login?error=not_guild_member"
+        );
     }
 }
 
