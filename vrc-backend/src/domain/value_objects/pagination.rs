@@ -46,6 +46,15 @@ impl<'de> Deserialize<'de> for PageRequest {
 }
 
 impl PageRequest {
+    /// Construct a validated PageRequest from raw values.
+    /// Returns `None` if constraints are violated.
+    pub fn new(page: u32, per_page: u32) -> Option<Self> {
+        if page == 0 || per_page == 0 || per_page > 100 {
+            return None;
+        }
+        Some(Self { page, per_page })
+    }
+
     pub fn page(&self) -> u32 {
         self.page
     }
