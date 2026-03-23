@@ -13,7 +13,7 @@ services:
       - RUST_LOG=vrc_backend=info,tower_http=info,sqlx=warn
       - BIND_ADDRESS=0.0.0.0:3000
       - BACKEND_BASE_URL=https://vrcapi.arivell-vm.com
-      - DATABASE_URL=postgres://${POSTGRES_USER:-vrc_app}:${POSTGRES_PASSWORD:-change-me}@db:5432/${POSTGRES_DB:-vrc_class_reunion}
+      - DATABASE_URL=${DATABASE_URL:?set DATABASE_URL in .env with host db and a URL-encoded password}
       - FRONTEND_ORIGIN=https://vrc10.arivell-vm.com
       - DISCORD_REDIRECT_URI=https://vrcapi.arivell-vm.com/api/v1/auth/discord/callback
       - COOKIE_SECURE=true

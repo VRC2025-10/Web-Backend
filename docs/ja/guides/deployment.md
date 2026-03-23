@@ -71,6 +71,10 @@ DISCORD_CLIENT_ID=your_client_id
 DISCORD_CLIENT_SECRET=your_client_secret
 DISCORD_GUILD_ID=your_guild_id
 BACKEND_BASE_URL=https://vrcapi.arivell-vm.com
+POSTGRES_USER=vrc_app
+POSTGRES_PASSWORD=your_database_password
+POSTGRES_DB=vrc_class_reunion
+DATABASE_URL=postgres://vrc_app:<url-encoded-password>@db:5432/vrc_class_reunion
 DISCORD_REDIRECT_URI=https://vrcapi.arivell-vm.com/api/v1/auth/discord/callback
 FRONTEND_ORIGIN=https://vrc10.arivell-vm.com
 COOKIE_SECURE=true
@@ -86,6 +90,8 @@ curl -s https://vrcapi.arivell-vm.com/health | jq .
 - `app` と `frontend` は `up -d` 時に自動ビルドされます
 - バックエンドは起動時に自動で DB マイグレーションを実行します
 - Cloudflare の WAF や Bot Fight Mode で Discord の OAuth コールバックを遮断しないでください
+- `DATABASE_URL` のホストは `db` を使います
+- `POSTGRES_PASSWORD` に記号が含まれる場合は、`DATABASE_URL` 側では URL エンコードしてください
 
 ## アップデート
 
