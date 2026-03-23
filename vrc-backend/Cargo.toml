@@ -5,11 +5,11 @@ edition = "2024"
 
 [dependencies]
 # Web framework
-axum = { version = "0.8", features = ["macros"] }
-axum-extra = { version = "0.10", features = ["cookie"] }
+axum = { version = "0.8", features = ["macros", "multipart"] }
+axum-extra = { version = "0.10", features = ["cookie", "query"] }
 tower = { version = "0.5", features = ["util", "timeout"] }
-tower-http = { version = "0.6", features = ["cors", "trace", "timeout", "catch-panic", "request-id", "set-header"] }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "time", "macros"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "timeout", "catch-panic", "request-id", "set-header", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "time", "macros", "fs", "io-util"] }
 hyper = { version = "1", features = ["server", "http1", "http2"] }
 
 # Database
@@ -58,6 +58,7 @@ chrono = { version = "0.4", features = ["serde"] }
 dotenvy = "0.15"
 ulid = "1"
 itoa = "1"
+serde_qs = "0.13"
 
 # Proc macros (workspace member)
 vrc-macros = { path = "../vrc-macros" }
