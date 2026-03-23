@@ -226,7 +226,7 @@ curl -X POST \
 
 Admin エンドポイントには管理者権限を持つ認証済みセッションが必要です。ベースパス: `/api/v1/internal/admin`
 
-> **注意**: ユーザーアカウントに管理者ロールが必要です。最初の管理者をブートストラップするには、`.env` に `SUPER_ADMIN_DISCORD_ID` として自分の Discord ID を設定してください。
+> **注意**: ユーザーアカウントに管理者ロールが必要です。最初の `super_admin` を付与するには、`.env` に `SUPER_ADMIN_DISCORD_ID` として自分の Discord ID を設定し、その Discord アカウントでログインしてください。
 
 ### ユーザー一覧（フィルタ付き）
 
