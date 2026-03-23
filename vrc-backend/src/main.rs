@@ -120,6 +120,7 @@ async fn run() -> Result<(), StartupError> {
     // Start background tasks
     scheduler::spawn(
         db_pool.clone(),
+        state.http_client.clone(),
         state.config.session_cleanup_interval_secs,
         state.config.event_archival_interval_secs,
     );

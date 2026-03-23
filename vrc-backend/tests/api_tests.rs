@@ -855,7 +855,7 @@ async fn test_auth_callback_invalid_state_clears_oauth_cookie() -> TestResult {
             .headers()
             .get("location")
             .and_then(|value| value.to_str().ok()),
-        Some("http://localhost:5173/auth/error?reason=invalid_state")
+        Some("http://localhost:5173/login?error=csrf_failed")
     );
 
     let set_cookie = response

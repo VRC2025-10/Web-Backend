@@ -18,6 +18,10 @@ use crate::errors::api::ApiError;
 pub struct AuthenticatedUser<R: Role> {
     pub user: User,
     pub session_id: Uuid,
+    pub discord_role_ids: Vec<String>,
+    pub discord_access_token: Option<String>,
+    pub discord_refresh_token: Option<String>,
+    pub discord_token_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     _phantom: PhantomData<R>,
 }
 
@@ -60,21 +64,22 @@ impl<R: Role> FromRequestParts<Arc<AppState>> for AuthenticatedUser<R> {
             let token_hash = crate::auth::crypto::sha256_hash(&token_bytes);
 
             // Lookup session + user in a single query
-            let row = sqlx::query_as!(
-                SessionUserRow,
+            let row = sqlx::query_as::<_, SessionUserRow>(
                 r#"
                 SELECT s.id as session_id, s.user_id, s.expires_at,
+                       s.discord_access_token, s.discord_refresh_token,
+                       s.discord_token_expires_at, s.discord_role_ids,
                        u.discord_id, u.discord_username,
                        u.discord_display_name, u.discord_avatar_hash,
                        u.avatar_url,
-                       u.role as "role: UserRole", u.status as "status: UserStatus",
+                       u.role, u.status,
                        u.joined_at, u.created_at, u.updated_at
                 FROM sessions s
                 JOIN users u ON u.id = s.user_id
                 WHERE s.token_hash = $1 AND s.expires_at > NOW()
                 "#,
-                &token_hash[..]
             )
+            .bind(&token_hash[..])
             .fetch_optional(&state.db_pool)
             .await
             .map_err(|e| {
@@ -113,6 +118,10 @@ impl<R: Role> FromRequestParts<Arc<AppState>> for AuthenticatedUser<R> {
             Ok(AuthenticatedUser {
                 user,
                 session_id: row.session_id,
+                discord_role_ids: row.discord_role_ids,
+                discord_access_token: row.discord_access_token,
+                discord_refresh_token: row.discord_refresh_token,
+                discord_token_expires_at: row.discord_token_expires_at,
                 _phantom: PhantomData,
             })
         }
@@ -120,12 +129,16 @@ impl<R: Role> FromRequestParts<Arc<AppState>> for AuthenticatedUser<R> {
 }
 
 /// Internal row type for session + user join query.
-#[derive(Debug)]
+#[derive(Debug, sqlx::FromRow)]
 struct SessionUserRow {
     session_id: Uuid,
     user_id: Uuid,
     #[allow(dead_code)]
     expires_at: chrono::DateTime<chrono::Utc>,
+    discord_access_token: Option<String>,
+    discord_refresh_token: Option<String>,
+    discord_token_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    discord_role_ids: Vec<String>,
     discord_id: String,
     discord_username: String,
     discord_display_name: String,

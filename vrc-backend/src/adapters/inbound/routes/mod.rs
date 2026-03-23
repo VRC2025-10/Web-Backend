@@ -4,6 +4,7 @@ pub mod health;
 pub mod internal;
 pub mod metrics_endpoint;
 pub mod public;
+pub mod schedule;
 pub mod system;
 
 use std::sync::Arc;
@@ -95,6 +96,7 @@ pub fn build_router(state: Arc<AppState>) -> Result<Router, RouteBuildError> {
     // Per-tier routers with rate limiting applied
     let internal_routes = Router::new()
         .merge(internal::routes())
+        .nest("/schedule", schedule::routes())
         .nest("/admin", admin::routes())
         .layer(csrf)
         .layer(SetResponseHeaderLayer::overriding(

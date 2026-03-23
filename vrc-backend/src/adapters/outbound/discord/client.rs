@@ -1,5 +1,5 @@
 use crate::domain::ports::services::discord_client::{
-    DiscordClient, DiscordGuild, DiscordTokenResponse, DiscordUser,
+    DiscordClient, DiscordGuild, DiscordGuildMember, DiscordTokenResponse, DiscordUser,
 };
 use crate::errors::infrastructure::InfraError;
 
@@ -91,6 +91,59 @@ impl DiscordClient for ReqwestDiscordClient {
         }
 
         resp.json::<Vec<DiscordGuild>>()
+            .await
+            .map_err(|e| InfraError::DiscordApi(e.to_string()))
+    }
+
+    async fn refresh_token(&self, refresh_token: &str) -> Result<DiscordTokenResponse, InfraError> {
+        let params = [
+            ("client_id", self.client_id.as_str()),
+            ("client_secret", self.client_secret.as_str()),
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+        ];
+
+        let resp = self
+            .http
+            .post("https://discord.com/api/v10/oauth2/token")
+            .form(&params)
+            .send()
+            .await
+            .map_err(|e| InfraError::DiscordApi(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            tracing::error!(status = %status, body = %body, "Discord token refresh failed");
+            return Err(InfraError::TokenExchange);
+        }
+
+        resp.json::<DiscordTokenResponse>()
+            .await
+            .map_err(|e| InfraError::DiscordApi(e.to_string()))
+    }
+
+    async fn get_current_guild_member(
+        &self,
+        access_token: &str,
+        guild_id: &str,
+    ) -> Result<DiscordGuildMember, InfraError> {
+        let resp = self
+            .http
+            .get(format!("https://discord.com/api/v10/users/@me/guilds/{guild_id}/member"))
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|e| InfraError::DiscordApi(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            tracing::error!(status = %status, body = %body, "Discord get guild member failed");
+            return Err(InfraError::DiscordApi("Failed to fetch guild member".to_owned()));
+        }
+
+        resp.json::<DiscordGuildMember>()
             .await
             .map_err(|e| InfraError::DiscordApi(e.to_string()))
     }

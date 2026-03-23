@@ -88,8 +88,8 @@ impl EventListQuery {
     fn page_request(&self) -> Result<PageRequest, ApiError> {
         PageRequest::new(self.page, self.per_page).ok_or_else(|| {
             ApiError::ValidationError(std::collections::HashMap::from([(
-                "pagination".to_owned(),
-                "page must be >= 1 and per_page must be between 1 and 100".to_owned(),
+                "query".to_owned(),
+                "クエリパラメータが不正です".to_owned(),
             )]))
         })
     }

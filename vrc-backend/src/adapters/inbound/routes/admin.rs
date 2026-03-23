@@ -14,11 +14,12 @@ use uuid::Uuid;
 use crate::AppState;
 use crate::adapters::inbound::extractors::{ValidatedJson, ValidatedPayload, ValidatedQuery};
 use crate::adapters::outbound::markdown::renderer::PulldownCmarkRenderer;
+use crate::auth::admin_permissions::{AdminPermissionSet, resolve_admin_permissions};
 use crate::auth::extractor::AuthenticatedUser;
-use crate::auth::roles::{Admin, Role, Staff};
+use crate::auth::roles::Member;
 use crate::domain::entities::gallery::{GalleryImageStatus, GalleryTargetType};
 use crate::domain::entities::report::{ReportStatus, ReportTargetType};
-use crate::domain::entities::user::{UserRole, UserStatus};
+use crate::domain::entities::user::{User, UserRole, UserStatus};
 use crate::domain::ports::services::markdown_renderer::MarkdownRenderer;
 use crate::domain::value_objects::pagination::{PageRequest, PageResponse};
 use crate::errors::api::ApiError;
@@ -83,6 +84,72 @@ struct AdminUserView {
     status: UserStatus,
     joined_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+struct AdminStatsView {
+    total_users: i64,
+    total_events: i64,
+    total_clubs: i64,
+    pending_reports: i64,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+struct AdminManagedRoleView {
+    id: Uuid,
+    discord_role_id: String,
+    display_name: String,
+    description: String,
+    can_view_dashboard: bool,
+    can_manage_users: bool,
+    can_manage_roles: bool,
+    can_manage_events: bool,
+    can_manage_tags: bool,
+    can_manage_reports: bool,
+    can_manage_galleries: bool,
+    can_manage_clubs: bool,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Deserialize)]
+struct AdminManagedRoleRequest {
+    discord_role_id: String,
+    display_name: String,
+    description: String,
+    can_view_dashboard: bool,
+    can_manage_users: bool,
+    can_manage_roles: bool,
+    can_manage_events: bool,
+    can_manage_tags: bool,
+    can_manage_reports: bool,
+    can_manage_galleries: bool,
+    can_manage_clubs: bool,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+struct AdminSystemRolePolicyView {
+    role: UserRole,
+    can_view_dashboard: bool,
+    can_manage_users: bool,
+    can_manage_roles: bool,
+    can_manage_events: bool,
+    can_manage_tags: bool,
+    can_manage_reports: bool,
+    can_manage_galleries: bool,
+    can_manage_clubs: bool,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Deserialize)]
+struct AdminSystemRolePolicyRequest {
+    can_view_dashboard: bool,
+    can_manage_users: bool,
+    can_manage_roles: bool,
+    can_manage_events: bool,
+    can_manage_tags: bool,
+    can_manage_reports: bool,
+    can_manage_galleries: bool,
+    can_manage_clubs: bool,
 }
 
 #[derive(Deserialize)]
@@ -519,12 +586,322 @@ struct ReportRow {
 
 // ===== Handlers =====
 
-#[vrc_macros::handler(method = GET, path = "/api/v1/internal/admin/users", role = Admin, rate_limit = "internal", summary = "List users")]
+async fn resolve_permissions(
+    state: &Arc<AppState>,
+    auth: &AuthenticatedUser<Member>,
+) -> Result<AdminPermissionSet, ApiError> {
+    resolve_admin_permissions(&state.db_pool, auth.user.role, &auth.discord_role_ids).await
+}
+
+fn ensure_admin_permission(
+    allowed: bool,
+    user: &User,
+    required: &'static str,
+) -> Result<(), ApiError> {
+    if allowed {
+        return Ok(());
+    }
+
+    Err(ApiError::InsufficientRole {
+        required,
+        actual: user.role.as_str().to_owned(),
+    })
+}
+
+fn validate_managed_role_request(payload: &AdminManagedRoleRequest) -> Result<(), ApiError> {
+    if payload.discord_role_id.trim().is_empty() || payload.display_name.trim().is_empty() {
+        return Err(ApiError::ValidationError(HashMap::from([(
+            "role".to_owned(),
+            "discord_role_id and display_name are required".to_owned(),
+        )])));
+    }
+
+    Ok(())
+}
+
+async fn load_managed_admin_roles(
+    state: &Arc<AppState>,
+) -> Result<Vec<AdminManagedRoleView>, ApiError> {
+    sqlx::query_as::<_, AdminManagedRoleView>(
+        r#"
+        SELECT id, discord_role_id, display_name, description,
+               can_view_dashboard, can_manage_users, can_manage_roles,
+               can_manage_events, can_manage_tags, can_manage_reports,
+               can_manage_galleries, can_manage_clubs, updated_at
+        FROM admin_managed_roles
+        ORDER BY display_name ASC, created_at ASC
+        "#,
+    )
+    .fetch_all(&state.db_pool)
+    .await
+    .map_err(|error| ApiError::Internal(error.to_string()))
+}
+
+async fn load_system_role_policies(
+    state: &Arc<AppState>,
+) -> Result<Vec<AdminSystemRolePolicyView>, ApiError> {
+    sqlx::query_as::<_, AdminSystemRolePolicyView>(
+        r#"
+        SELECT role, can_view_dashboard, can_manage_users, can_manage_roles,
+               can_manage_events, can_manage_tags, can_manage_reports,
+               can_manage_galleries, can_manage_clubs, updated_at
+        FROM admin_system_role_permissions
+        ORDER BY CASE role
+            WHEN 'member' THEN 0
+            WHEN 'staff' THEN 1
+            WHEN 'admin' THEN 2
+            ELSE 3
+        END
+        "#,
+    )
+    .fetch_all(&state.db_pool)
+    .await
+    .map_err(|error| ApiError::Internal(error.to_string()))
+}
+
+fn validate_system_role_policy_target(role: UserRole) -> Result<(), ApiError> {
+    if role == UserRole::SuperAdmin {
+        return Err(ApiError::ValidationError(HashMap::from([(
+            "role".to_owned(),
+            "super_admin policy is fixed and cannot be edited".to_owned(),
+        )])));
+    }
+
+    Ok(())
+}
+
+#[vrc_macros::handler(method = GET, path = "/api/v1/internal/admin/stats", role = Member, rate_limit = "internal", summary = "Get admin dashboard stats")]
+async fn get_admin_stats(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedUser<Member>,
+) -> Result<Json<AdminStatsView>, ApiError> {
+    let permissions = resolve_permissions(&state, &auth).await?;
+    ensure_admin_permission(permissions.view_dashboard, &auth.user, "admin:view_dashboard")?;
+
+    let stats = sqlx::query_as::<_, AdminStatsView>(
+        r#"
+        SELECT
+            (SELECT COUNT(*)::BIGINT FROM users WHERE status = 'active') AS total_users,
+            (SELECT COUNT(*)::BIGINT FROM events) AS total_events,
+            (SELECT COUNT(*)::BIGINT FROM clubs) AS total_clubs,
+            (SELECT COUNT(*)::BIGINT FROM reports WHERE status = 'open') AS pending_reports
+        "#,
+    )
+    .fetch_one(&state.db_pool)
+    .await
+    .map_err(|error| ApiError::Internal(error.to_string()))?;
+
+    Ok(Json(stats))
+}
+
+#[vrc_macros::handler(method = GET, path = "/api/v1/internal/admin/roles", role = Member, rate_limit = "internal", summary = "List managed admin roles")]
+async fn list_managed_roles(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedUser<Member>,
+) -> Result<Json<Vec<AdminManagedRoleView>>, ApiError> {
+    let permissions = resolve_permissions(&state, &auth).await?;
+    ensure_admin_permission(permissions.manage_roles, &auth.user, "admin:manage_roles")?;
+
+    Ok(Json(load_managed_admin_roles(&state).await?))
+}
+
+#[vrc_macros::handler(method = GET, path = "/api/v1/internal/admin/role-policies", role = Member, rate_limit = "internal", summary = "List editable system role policies")]
+async fn list_system_role_policies(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedUser<Member>,
+) -> Result<Json<Vec<AdminSystemRolePolicyView>>, ApiError> {
+    let permissions = resolve_permissions(&state, &auth).await?;
+    ensure_admin_permission(permissions.manage_roles, &auth.user, "admin:manage_roles")?;
+
+    Ok(Json(load_system_role_policies(&state).await?))
+}
+
+#[vrc_macros::handler(method = PATCH, path = "/api/v1/internal/admin/role-policies/{role}", role = Member, rate_limit = "internal", summary = "Update editable system role policy")]
+async fn update_system_role_policy(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedUser<Member>,
+    Path(role): Path<UserRole>,
+    Json(body): Json<AdminSystemRolePolicyRequest>,
+) -> Result<Json<AdminSystemRolePolicyView>, ApiError> {
+    let permissions = resolve_permissions(&state, &auth).await?;
+    ensure_admin_permission(permissions.manage_roles, &auth.user, "admin:manage_roles")?;
+    validate_system_role_policy_target(role)?;
+
+    let policy = sqlx::query_as::<_, AdminSystemRolePolicyView>(
+        r#"
+        UPDATE admin_system_role_permissions
+        SET can_view_dashboard = $2,
+            can_manage_users = $3,
+            can_manage_roles = $4,
+            can_manage_events = $5,
+            can_manage_tags = $6,
+            can_manage_reports = $7,
+            can_manage_galleries = $8,
+            can_manage_clubs = $9,
+            updated_at = NOW()
+        WHERE role = $1
+        RETURNING role, can_view_dashboard, can_manage_users, can_manage_roles,
+                  can_manage_events, can_manage_tags, can_manage_reports,
+                  can_manage_galleries, can_manage_clubs, updated_at
+        "#,
+    )
+    .bind(role)
+    .bind(body.can_view_dashboard)
+    .bind(body.can_manage_users)
+    .bind(body.can_manage_roles)
+    .bind(body.can_manage_events)
+    .bind(body.can_manage_tags)
+    .bind(body.can_manage_reports)
+    .bind(body.can_manage_galleries)
+    .bind(body.can_manage_clubs)
+    .fetch_optional(&state.db_pool)
+    .await
+    .map_err(|error| ApiError::Internal(error.to_string()))?
+    .ok_or_else(|| {
+        ApiError::ValidationError(HashMap::from([(
+            "role".to_owned(),
+            "system role policy was not found".to_owned(),
+        )]))
+    })?;
+
+    Ok(Json(policy))
+}
+
+#[vrc_macros::handler(method = POST, path = "/api/v1/internal/admin/roles", role = Member, rate_limit = "internal", summary = "Create managed admin role")]
+async fn create_managed_role(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedUser<Member>,
+    Json(body): Json<AdminManagedRoleRequest>,
+) -> Result<(StatusCode, Json<AdminManagedRoleView>), ApiError> {
+    let permissions = resolve_permissions(&state, &auth).await?;
+    ensure_admin_permission(permissions.manage_roles, &auth.user, "admin:manage_roles")?;
+    validate_managed_role_request(&body)?;
+
+    let role = sqlx::query_as::<_, AdminManagedRoleView>(
+        r#"
+        INSERT INTO admin_managed_roles (
+            discord_role_id, display_name, description,
+            can_view_dashboard, can_manage_users, can_manage_roles,
+            can_manage_events, can_manage_tags, can_manage_reports,
+            can_manage_galleries, can_manage_clubs
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        RETURNING id, discord_role_id, display_name, description,
+                  can_view_dashboard, can_manage_users, can_manage_roles,
+                  can_manage_events, can_manage_tags, can_manage_reports,
+                  can_manage_galleries, can_manage_clubs, updated_at
+        "#,
+    )
+    .bind(body.discord_role_id.trim())
+    .bind(body.display_name.trim())
+    .bind(body.description.trim())
+    .bind(body.can_view_dashboard)
+    .bind(body.can_manage_users)
+    .bind(body.can_manage_roles)
+    .bind(body.can_manage_events)
+    .bind(body.can_manage_tags)
+    .bind(body.can_manage_reports)
+    .bind(body.can_manage_galleries)
+    .bind(body.can_manage_clubs)
+    .fetch_one(&state.db_pool)
+    .await
+    .map_err(|error| ApiError::Internal(error.to_string()))?;
+
+    Ok((StatusCode::CREATED, Json(role)))
+}
+
+#[vrc_macros::handler(method = PATCH, path = "/api/v1/internal/admin/roles/{id}", role = Member, rate_limit = "internal", summary = "Update managed admin role")]
+async fn update_managed_role(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedUser<Member>,
+    Path(role_id): Path<Uuid>,
+    Json(body): Json<AdminManagedRoleRequest>,
+) -> Result<Json<AdminManagedRoleView>, ApiError> {
+    let permissions = resolve_permissions(&state, &auth).await?;
+    ensure_admin_permission(permissions.manage_roles, &auth.user, "admin:manage_roles")?;
+    validate_managed_role_request(&body)?;
+
+    let role = sqlx::query_as::<_, AdminManagedRoleView>(
+        r#"
+        UPDATE admin_managed_roles
+        SET discord_role_id = $2,
+            display_name = $3,
+            description = $4,
+            can_view_dashboard = $5,
+            can_manage_users = $6,
+            can_manage_roles = $7,
+            can_manage_events = $8,
+            can_manage_tags = $9,
+            can_manage_reports = $10,
+            can_manage_galleries = $11,
+            can_manage_clubs = $12,
+            updated_at = NOW()
+        WHERE id = $1
+        RETURNING id, discord_role_id, display_name, description,
+                  can_view_dashboard, can_manage_users, can_manage_roles,
+                  can_manage_events, can_manage_tags, can_manage_reports,
+                  can_manage_galleries, can_manage_clubs, updated_at
+        "#,
+    )
+    .bind(role_id)
+    .bind(body.discord_role_id.trim())
+    .bind(body.display_name.trim())
+    .bind(body.description.trim())
+    .bind(body.can_view_dashboard)
+    .bind(body.can_manage_users)
+    .bind(body.can_manage_roles)
+    .bind(body.can_manage_events)
+    .bind(body.can_manage_tags)
+    .bind(body.can_manage_reports)
+    .bind(body.can_manage_galleries)
+    .bind(body.can_manage_clubs)
+    .fetch_optional(&state.db_pool)
+    .await
+    .map_err(|error| ApiError::Internal(error.to_string()))?
+    .ok_or_else(|| {
+        ApiError::ValidationError(HashMap::from([(
+            "role".to_owned(),
+            "managed role was not found".to_owned(),
+        )]))
+    })?;
+
+    Ok(Json(role))
+}
+
+#[vrc_macros::handler(method = DELETE, path = "/api/v1/internal/admin/roles/{id}", role = Member, rate_limit = "internal", summary = "Delete managed admin role")]
+async fn delete_managed_role(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedUser<Member>,
+    Path(role_id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let permissions = resolve_permissions(&state, &auth).await?;
+    ensure_admin_permission(permissions.manage_roles, &auth.user, "admin:manage_roles")?;
+
+    let result = sqlx::query("DELETE FROM admin_managed_roles WHERE id = $1")
+        .bind(role_id)
+        .execute(&state.db_pool)
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+
+    if result.rows_affected() == 0 {
+        return Err(ApiError::ValidationError(HashMap::from([(
+            "role".to_owned(),
+            "managed role was not found".to_owned(),
+        )])));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[vrc_macros::handler(method = GET, path = "/api/v1/internal/admin/users", role = Member, rate_limit = "internal", summary = "List users")]
 async fn list_users(
     State(state): State<Arc<AppState>>,
-    _auth: AuthenticatedUser<Admin>,
+    auth: AuthenticatedUser<Member>,
     ValidatedQuery(query): ValidatedQuery<UserListQuery>,
 ) -> Result<PageResponse<AdminUserView>, ApiError> {
+    let permissions = resolve_permissions(&state, &auth).await?;
+    ensure_admin_permission(permissions.manage_users, &auth.user, "admin:manage_users")?;
+
     let page = query.page_request()?;
     let rows = sqlx::query_as!(
         AdminUserRow,
@@ -579,17 +956,18 @@ async fn list_users(
 }
 
 /// Validate role change authorization rules per spec:
-/// - Only admin+ can change roles (ERR-ROLE-004)
+/// - Caller must have admin role management permission (ERR-ROLE-004)
 /// - Cannot modify `super_admin` unless you are `super_admin` (ERR-ROLE-003)
 /// - Only `super_admin` can grant admin (ERR-ROLE-001)
 /// - Only `super_admin` can grant `super_admin` (ERR-ROLE-002)
 fn validate_role_change(
     actor_role: UserRole,
+    actor_can_manage_roles: bool,
     target_role: UserRole,
     new_role: UserRole,
 ) -> Result<(), ApiError> {
-    // Rule 1: Only admin+ can change roles
-    if actor_role.level() < Admin::LEVEL {
+    // Rule 1: Caller must have explicit role management permission.
+    if !actor_can_manage_roles {
         return Err(ApiError::RoleLevelInsufficient);
     }
 
@@ -611,13 +989,16 @@ fn validate_role_change(
     Ok(())
 }
 
-#[vrc_macros::handler(method = PATCH, path = "/api/v1/internal/admin/users/{id}/role", role = Admin, rate_limit = "internal", summary = "Change user role")]
+#[vrc_macros::handler(method = PATCH, path = "/api/v1/internal/admin/users/{id}/role", role = Member, rate_limit = "internal", summary = "Change user role")]
 async fn change_user_role(
     State(state): State<Arc<AppState>>,
-    auth: AuthenticatedUser<Admin>,
+    auth: AuthenticatedUser<Member>,
     Path(user_id): Path<Uuid>,
     Json(body): Json<RoleChangeRequest>,
 ) -> Result<Json<RoleChangeResponse>, ApiError> {
+    let permissions = resolve_permissions(&state, &auth).await?;
+    ensure_admin_permission(permissions.manage_roles, &auth.user, "admin:manage_roles")?;
+
     // Fetch the target user to check their current role
     let target = sqlx::query_as!(
         AdminUserRow,
@@ -634,7 +1015,7 @@ async fn change_user_role(
     .map_err(|e| ApiError::Internal(e.to_string()))?
     .ok_or(ApiError::UserNotFound)?;
 
-    validate_role_change(auth.user.role, target.role, body.role)?;
+    validate_role_change(auth.user.role, permissions.manage_roles, target.role, body.role)?;
 
     let updated = sqlx::query!(
         r#"
@@ -663,13 +1044,16 @@ async fn change_user_role(
     }))
 }
 
-#[vrc_macros::handler(method = PATCH, path = "/api/v1/internal/admin/users/{id}/status", role = Admin, rate_limit = "internal", summary = "Change user status")]
+#[vrc_macros::handler(method = PATCH, path = "/api/v1/internal/admin/users/{id}/status", role = Member, rate_limit = "internal", summary = "Change user status")]
 async fn change_user_status(
     State(state): State<Arc<AppState>>,
-    auth: AuthenticatedUser<Admin>,
+    auth: AuthenticatedUser<Member>,
     Path(user_id): Path<Uuid>,
     Json(body): Json<StatusChangeRequest>,
 ) -> Result<Json<StatusChangeResponse>, ApiError> {
+    let permissions = resolve_permissions(&state, &auth).await?;
+    ensure_admin_permission(permissions.manage_users, &auth.user, "admin:manage_users")?;
+
     // Fetch the target user to enforce super_admin protection
     let target = sqlx::query_as!(
         AdminUserRow,
@@ -734,12 +1118,15 @@ async fn change_user_status(
     }))
 }
 
-#[vrc_macros::handler(method = GET, path = "/api/v1/internal/admin/reports", role = Staff, rate_limit = "internal", summary = "List reports")]
+#[vrc_macros::handler(method = GET, path = "/api/v1/internal/admin/reports", role = Member, rate_limit = "internal", summary = "List reports")]
 async fn list_reports(
     State(state): State<Arc<AppState>>,
-    _auth: AuthenticatedUser<Staff>,
+    auth: AuthenticatedUser<Member>,
     ValidatedQuery(query): ValidatedQuery<ReportListQuery>,
 ) -> Result<PageResponse<AdminReportView>, ApiError> {
+    let permissions = resolve_permissions(&state, &auth).await?;
+    ensure_admin_permission(permissions.manage_reports, &auth.user, "admin:manage_reports")?;
+
     let page = query.page_request()?;
     let rows = sqlx::query_as::<_, ReportRow>(
         r#"
@@ -794,12 +1181,15 @@ async fn list_reports(
     Ok(PageResponse::new(items, count, page.per_page()))
 }
 
-#[vrc_macros::handler(method = GET, path = "/api/v1/internal/admin/galleries", role = Staff, rate_limit = "internal", summary = "List gallery images")]
+#[vrc_macros::handler(method = GET, path = "/api/v1/internal/admin/galleries", role = Member, rate_limit = "internal", summary = "List gallery images")]
 async fn list_galleries(
     State(state): State<Arc<AppState>>,
-    _auth: AuthenticatedUser<Staff>,
+    auth: AuthenticatedUser<Member>,
     ValidatedQuery(query): ValidatedQuery<GalleryListQuery>,
 ) -> Result<PageResponse<AdminGalleryView>, ApiError> {
+    let permissions = resolve_permissions(&state, &auth).await?;
+    ensure_admin_permission(permissions.manage_galleries, &auth.user, "admin:manage_galleries")?;
+
     let page = query.page_request()?;
 
     let rows = sqlx::query_as::<_, AdminGalleryRow>(
@@ -819,7 +1209,7 @@ async fn list_galleries(
         LEFT JOIN clubs c ON c.id = g.club_id
         WHERE ($1::gallery_target_type IS NULL OR g.target_type = $1)
           AND ($2::uuid IS NULL OR g.club_id = $2)
-        ORDER BY g.created_at DESC
+        ORDER BY g.created_at DESC, g.id DESC
         LIMIT $3 OFFSET $4
         "#,
     )
@@ -852,13 +1242,16 @@ async fn list_galleries(
     ))
 }
 
-#[vrc_macros::handler(method = PATCH, path = "/api/v1/internal/admin/reports/{id}", role = Staff, rate_limit = "internal", summary = "Resolve report")]
+#[vrc_macros::handler(method = PATCH, path = "/api/v1/internal/admin/reports/{id}", role = Member, rate_limit = "internal", summary = "Resolve report")]
 async fn resolve_report(
     State(state): State<Arc<AppState>>,
-    auth: AuthenticatedUser<Staff>,
+    auth: AuthenticatedUser<Member>,
     Path(report_id): Path<Uuid>,
     Json(body): Json<ResolveReportRequest>,
 ) -> Result<Json<ResolveReportResponse>, ApiError> {
+    let permissions = resolve_permissions(&state, &auth).await?;
+    ensure_admin_permission(permissions.manage_reports, &auth.user, "admin:manage_reports")?;
+
     // Only allow resolving to reviewed or dismissed — not back to open
     if body.status == ReportStatus::Open {
         let mut errors = HashMap::new();
@@ -897,12 +1290,15 @@ async fn resolve_report(
     }))
 }
 
-#[vrc_macros::handler(method = POST, path = "/api/v1/internal/admin/clubs", role = Staff, rate_limit = "internal", summary = "Create club")]
+#[vrc_macros::handler(method = POST, path = "/api/v1/internal/admin/clubs", role = Member, rate_limit = "internal", summary = "Create club")]
 async fn create_club(
     State(state): State<Arc<AppState>>,
-    auth: AuthenticatedUser<Staff>,
+    auth: AuthenticatedUser<Member>,
     ValidatedJson(body): ValidatedJson<CreateClubRequest>,
 ) -> Result<(StatusCode, Json<ClubResponse>), ApiError> {
+    let permissions = resolve_permissions(&state, &auth).await?;
+    ensure_admin_permission(permissions.manage_clubs, &auth.user, "admin:manage_clubs")?;
+
     // Verify owner is an active user
     let owner_exists = sqlx::query_scalar!(
         r#"SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND status = 'active') as "exists!: bool""#,
@@ -993,7 +1389,7 @@ async fn create_club(
 
 async fn create_gallery_image(
     state: &Arc<AppState>,
-    auth: &AuthenticatedUser<Staff>,
+    auth: &AuthenticatedUser<Member>,
     body: UploadGalleryRequest,
 ) -> Result<(StatusCode, Json<AdminGalleryView>), ApiError> {
     validate_gallery_scope(&body)?;
@@ -1044,7 +1440,7 @@ async fn ensure_gallery_target_exists(
 
 async fn insert_gallery_image_tx(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    auth: &AuthenticatedUser<Staff>,
+    auth: &AuthenticatedUser<Member>,
     target_type: GalleryTargetType,
     club_id: Option<Uuid>,
     club_name: Option<String>,
@@ -1081,12 +1477,15 @@ async fn insert_gallery_image_tx(
     Ok(to_admin_gallery_view(AdminGalleryRow { club_name, ..row }))
 }
 
-#[vrc_macros::handler(method = POST, path = "/api/v1/internal/admin/gallery/files", role = Staff, rate_limit = "internal", summary = "Upload gallery image files")]
+#[vrc_macros::handler(method = POST, path = "/api/v1/internal/admin/gallery/files", role = Member, rate_limit = "internal", summary = "Upload gallery image files")]
 async fn upload_gallery_files(
     State(state): State<Arc<AppState>>,
-    auth: AuthenticatedUser<Staff>,
+    auth: AuthenticatedUser<Member>,
     mut multipart: Multipart,
 ) -> Result<(StatusCode, Json<GalleryUploadBatchResponse>), ApiError> {
+    let permissions = resolve_permissions(&state, &auth).await?;
+    ensure_admin_permission(permissions.manage_galleries, &auth.user, "admin:manage_galleries")?;
+
     let mut target_type = None;
     let mut club_id = None;
     let mut caption = None;
@@ -1246,22 +1645,28 @@ async fn upload_gallery_files(
     ))
 }
 
-#[vrc_macros::handler(method = POST, path = "/api/v1/internal/admin/gallery", role = Staff, rate_limit = "internal", summary = "Create gallery image")]
+#[vrc_macros::handler(method = POST, path = "/api/v1/internal/admin/gallery", role = Member, rate_limit = "internal", summary = "Create gallery image")]
 async fn upload_gallery_image(
     State(state): State<Arc<AppState>>,
-    auth: AuthenticatedUser<Staff>,
+    auth: AuthenticatedUser<Member>,
     ValidatedJson(body): ValidatedJson<UploadGalleryRequest>,
 ) -> Result<(StatusCode, Json<AdminGalleryView>), ApiError> {
+    let permissions = resolve_permissions(&state, &auth).await?;
+    ensure_admin_permission(permissions.manage_galleries, &auth.user, "admin:manage_galleries")?;
+
     create_gallery_image(&state, &auth, body).await
 }
 
-#[vrc_macros::handler(method = POST, path = "/api/v1/internal/admin/clubs/{id}/gallery", role = Staff, rate_limit = "internal", summary = "Upload gallery image")]
+#[vrc_macros::handler(method = POST, path = "/api/v1/internal/admin/clubs/{id}/gallery", role = Member, rate_limit = "internal", summary = "Upload gallery image")]
 async fn upload_club_gallery_image(
     State(state): State<Arc<AppState>>,
-    auth: AuthenticatedUser<Staff>,
+    auth: AuthenticatedUser<Member>,
     Path(club_id): Path<Uuid>,
     ValidatedJson(body): ValidatedJson<UploadClubGalleryRequest>,
 ) -> Result<(StatusCode, Json<AdminGalleryView>), ApiError> {
+    let permissions = resolve_permissions(&state, &auth).await?;
+    ensure_admin_permission(permissions.manage_galleries, &auth.user, "admin:manage_galleries")?;
+
     create_gallery_image(
         &state,
         &auth,
@@ -1275,13 +1680,16 @@ async fn upload_club_gallery_image(
     .await
 }
 
-#[vrc_macros::handler(method = PATCH, path = "/api/v1/internal/admin/gallery/{image_id}/status", role = Staff, rate_limit = "internal", summary = "Update gallery status")]
+#[vrc_macros::handler(method = PATCH, path = "/api/v1/internal/admin/gallery/{image_id}/status", role = Member, rate_limit = "internal", summary = "Update gallery status")]
 async fn update_gallery_status(
     State(state): State<Arc<AppState>>,
-    auth: AuthenticatedUser<Staff>,
+    auth: AuthenticatedUser<Member>,
     Path(image_id): Path<Uuid>,
     Json(body): Json<GalleryStatusRequest>,
 ) -> Result<Json<GalleryStatusResponse>, ApiError> {
+    let permissions = resolve_permissions(&state, &auth).await?;
+    ensure_admin_permission(permissions.manage_galleries, &auth.user, "admin:manage_galleries")?;
+
     // Only allow approved or rejected
     if body.status == GalleryImageStatus::Pending {
         return Err(ApiError::InvalidGalleryStatus);
@@ -1319,12 +1727,15 @@ async fn update_gallery_status(
     }))
 }
 
-#[vrc_macros::handler(method = DELETE, path = "/api/v1/internal/admin/gallery/{image_id}", role = Staff, rate_limit = "internal", summary = "Delete gallery image")]
+#[vrc_macros::handler(method = DELETE, path = "/api/v1/internal/admin/gallery/{image_id}", role = Member, rate_limit = "internal", summary = "Delete gallery image")]
 async fn delete_gallery_image(
     State(state): State<Arc<AppState>>,
-    auth: AuthenticatedUser<Staff>,
+    auth: AuthenticatedUser<Member>,
     Path(image_id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
+    let permissions = resolve_permissions(&state, &auth).await?;
+    ensure_admin_permission(permissions.manage_galleries, &auth.user, "admin:manage_galleries")?;
+
     let deleted = sqlx::query_as::<_, DeletedGalleryRow>(
         r#"
         DELETE FROM gallery_images
@@ -1353,6 +1764,11 @@ async fn delete_gallery_image(
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/stats", get(get_admin_stats))
+        .route("/role-policies", get(list_system_role_policies))
+        .route("/role-policies/{role}", patch(update_system_role_policy))
+        .route("/roles", get(list_managed_roles).post(create_managed_role))
+        .route("/roles/{id}", patch(update_managed_role).delete(delete_managed_role))
         .route("/users", get(list_users))
         .route("/users/{id}/role", patch(change_user_role))
         .route("/users/{id}/status", patch(change_user_status))
@@ -1373,38 +1789,38 @@ mod tests {
 
     #[test]
     fn test_admin_can_set_member_to_staff() {
-        assert!(validate_role_change(UserRole::Admin, UserRole::Member, UserRole::Staff).is_ok());
+        assert!(validate_role_change(UserRole::Admin, true, UserRole::Member, UserRole::Staff).is_ok());
     }
 
     #[test]
     fn test_admin_cannot_grant_admin() {
-        let result = validate_role_change(UserRole::Admin, UserRole::Member, UserRole::Admin);
+        let result = validate_role_change(UserRole::Admin, true, UserRole::Member, UserRole::Admin);
         assert!(matches!(result, Err(ApiError::AdminRoleEscalation)));
     }
 
     #[test]
     fn test_admin_cannot_grant_super_admin() {
-        let result = validate_role_change(UserRole::Admin, UserRole::Member, UserRole::SuperAdmin);
+        let result = validate_role_change(UserRole::Admin, true, UserRole::Member, UserRole::SuperAdmin);
         assert!(matches!(result, Err(ApiError::SuperAdminRoleEscalation)));
     }
 
     #[test]
     fn test_admin_cannot_modify_super_admin() {
-        let result = validate_role_change(UserRole::Admin, UserRole::SuperAdmin, UserRole::Member);
+        let result = validate_role_change(UserRole::Admin, true, UserRole::SuperAdmin, UserRole::Member);
         assert!(matches!(result, Err(ApiError::SuperAdminProtected)));
     }
 
     #[test]
     fn test_super_admin_can_grant_admin() {
         assert!(
-            validate_role_change(UserRole::SuperAdmin, UserRole::Member, UserRole::Admin).is_ok()
+            validate_role_change(UserRole::SuperAdmin, true, UserRole::Member, UserRole::Admin).is_ok()
         );
     }
 
     #[test]
     fn test_super_admin_can_grant_super_admin() {
         assert!(
-            validate_role_change(UserRole::SuperAdmin, UserRole::Member, UserRole::SuperAdmin)
+            validate_role_change(UserRole::SuperAdmin, true, UserRole::Member, UserRole::SuperAdmin)
                 .is_ok()
         );
     }
@@ -1412,26 +1828,26 @@ mod tests {
     #[test]
     fn test_super_admin_can_modify_super_admin() {
         assert!(
-            validate_role_change(UserRole::SuperAdmin, UserRole::SuperAdmin, UserRole::Member)
+            validate_role_change(UserRole::SuperAdmin, true, UserRole::SuperAdmin, UserRole::Member)
                 .is_ok()
         );
     }
 
     #[test]
     fn test_member_cannot_change_roles() {
-        let result = validate_role_change(UserRole::Member, UserRole::Member, UserRole::Staff);
+        let result = validate_role_change(UserRole::Member, false, UserRole::Member, UserRole::Staff);
         assert!(matches!(result, Err(ApiError::RoleLevelInsufficient)));
     }
 
     #[test]
     fn test_staff_cannot_change_roles() {
-        let result = validate_role_change(UserRole::Staff, UserRole::Member, UserRole::Staff);
+        let result = validate_role_change(UserRole::Staff, false, UserRole::Member, UserRole::Staff);
         assert!(matches!(result, Err(ApiError::RoleLevelInsufficient)));
     }
 
     #[test]
     fn test_admin_can_demote_staff_to_member() {
-        assert!(validate_role_change(UserRole::Admin, UserRole::Staff, UserRole::Member).is_ok());
+        assert!(validate_role_change(UserRole::Admin, true, UserRole::Staff, UserRole::Member).is_ok());
     }
 }
 
@@ -1453,15 +1869,16 @@ mod kani_proofs {
     }
 
     /// P1: If a role change is allowed, the actor must have sufficient privilege.
-    /// Specifically, actor.level() >= new_role.level().
+    /// Specifically, the actor must have the explicit manage_roles permission.
     #[kani::proof]
     fn proof_role_change_no_escalation() {
         let actor_role = any_role();
         let target_current_role = any_role();
         let new_role = any_role();
+        let actor_can_manage_roles: bool = kani::any();
 
-        if validate_role_change(actor_role, target_current_role, new_role).is_ok() {
-            assert!(actor_role.level() >= new_role.level());
+        if validate_role_change(actor_role, actor_can_manage_roles, target_current_role, new_role).is_ok() {
+            assert!(actor_can_manage_roles);
         }
     }
 
@@ -1472,7 +1889,7 @@ mod kani_proofs {
         let new_role = any_role();
         kani::assume(new_role == UserRole::Admin || new_role == UserRole::SuperAdmin);
 
-        let result = validate_role_change(UserRole::Admin, target_current_role, new_role);
+        let result = validate_role_change(UserRole::Admin, true, target_current_role, new_role);
         assert!(result.is_err());
     }
 
@@ -1488,7 +1905,9 @@ mod kani_proofs {
         let sa_count = roles.iter().filter(|r| **r == UserRole::SuperAdmin).count();
         kani::assume(sa_count >= 1);
 
-        if validate_role_change(roles[actor_idx], roles[target_idx], new_role).is_ok() {
+        let actor_can_manage_roles: bool = kani::any();
+
+        if validate_role_change(roles[actor_idx], actor_can_manage_roles, roles[target_idx], new_role).is_ok() {
             let mut new_roles = roles;
             new_roles[target_idx] = new_role;
             let new_sa_count = new_roles
@@ -1508,7 +1927,7 @@ mod kani_proofs {
         let target_role = any_role();
         let new_role = any_role();
 
-        assert!(validate_role_change(UserRole::Member, target_role, new_role).is_err());
-        assert!(validate_role_change(UserRole::Staff, target_role, new_role).is_err());
+        assert!(validate_role_change(UserRole::Member, false, target_role, new_role).is_err());
+        assert!(validate_role_change(UserRole::Staff, false, target_role, new_role).is_err());
     }
 }

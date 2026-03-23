@@ -13,6 +13,7 @@ use uuid::Uuid;
 use crate::AppState;
 use crate::adapters::inbound::extractors::{ValidatedJson, ValidatedPayload, ValidatedQuery};
 use crate::adapters::outbound::markdown::renderer::PulldownCmarkRenderer;
+use crate::auth::admin_permissions::{AdminPermissionSet, resolve_admin_permissions};
 use crate::auth::extractor::AuthenticatedUser;
 use crate::auth::roles::Member;
 use crate::domain::entities::event::EventStatus;
@@ -93,6 +94,9 @@ struct MeResponse {
     status: crate::domain::entities::user::UserStatus,
     joined_at: chrono::DateTime<Utc>,
     profile: Option<MeProfile>,
+    admin_access: bool,
+    admin_permissions: AdminPermissionSet,
+    schedule_access: bool,
 }
 
 #[derive(Serialize)]
@@ -282,6 +286,42 @@ async fn get_me(
         is_public: item.is_public,
     });
 
+    let admin_permissions = resolve_admin_permissions(&state.db_pool, auth.user.role, &auth.discord_role_ids).await?;
+    let admin_access = admin_permissions.has_any();
+
+    let schedule_access = if auth.user.role.level() >= crate::domain::entities::user::UserRole::Staff.level() {
+        true
+    } else if auth.discord_role_ids.is_empty() {
+        false
+    } else {
+        #[derive(sqlx::FromRow)]
+        struct ScheduleAccessRow {
+            schedule_access: bool,
+        }
+
+        sqlx::query_as::<_, ScheduleAccessRow>(
+            r#"
+            SELECT COALESCE(
+                BOOL_OR(
+                    can_manage_roles
+                    OR can_manage_events
+                    OR can_manage_templates
+                    OR can_manage_notifications
+                    OR can_view_restricted_events
+                ),
+                FALSE
+            ) AS schedule_access
+            FROM schedule_managed_roles
+            WHERE discord_role_id = ANY($1)
+            "#,
+        )
+        .bind(&auth.discord_role_ids)
+        .fetch_one(&state.db_pool)
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?
+        .schedule_access
+    };
+
     Ok(Json(MeResponse {
         id: auth.user.id,
         discord_id: auth.user.discord_id,
@@ -293,6 +333,9 @@ async fn get_me(
         status: auth.user.status,
         joined_at: auth.user.joined_at,
         profile,
+        admin_access,
+        admin_permissions,
+        schedule_access,
     }))
 }
 
