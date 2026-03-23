@@ -1,11 +1,13 @@
 use std::collections::HashMap;
+use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Multipart, Path, State};
 use axum::http::StatusCode;
-use axum::routing::{get, patch, post};
+use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -14,7 +16,7 @@ use crate::adapters::inbound::extractors::{ValidatedJson, ValidatedPayload, Vali
 use crate::adapters::outbound::markdown::renderer::PulldownCmarkRenderer;
 use crate::auth::extractor::AuthenticatedUser;
 use crate::auth::roles::{Admin, Role, Staff};
-use crate::domain::entities::gallery::GalleryImageStatus;
+use crate::domain::entities::gallery::{GalleryImageStatus, GalleryTargetType};
 use crate::domain::entities::report::{ReportStatus, ReportTargetType};
 use crate::domain::entities::user::{UserRole, UserStatus};
 use crate::domain::ports::services::markdown_renderer::MarkdownRenderer;
@@ -49,10 +51,26 @@ fn is_valid_https_url(url: &str) -> bool {
 
 #[derive(Deserialize)]
 struct UserListQuery {
-    #[serde(flatten)]
-    page: PageRequest,
+    #[serde(default = "default_page")]
+    page: u32,
+    #[serde(default = "default_per_page")]
+    per_page: u32,
     status: Option<UserStatus>,
     role: Option<UserRole>,
+}
+
+fn default_page() -> u32 { 1 }
+fn default_per_page() -> u32 { 20 }
+
+impl UserListQuery {
+    fn page_request(&self) -> Result<PageRequest, ApiError> {
+        PageRequest::new(self.page, self.per_page).ok_or_else(|| {
+            ApiError::ValidationError(std::collections::HashMap::from([(
+                "pagination".to_owned(),
+                "page must be >= 1 and per_page must be between 1 and 100".to_owned(),
+            )]))
+        })
+    }
 }
 
 #[derive(Serialize)]
@@ -95,9 +113,22 @@ struct StatusChangeResponse {
 
 #[derive(Deserialize)]
 struct ReportListQuery {
-    #[serde(flatten)]
-    page: PageRequest,
+    #[serde(default = "default_page")]
+    page: u32,
+    #[serde(default = "default_per_page")]
+    per_page: u32,
     status: Option<ReportStatus>,
+}
+
+impl ReportListQuery {
+    fn page_request(&self) -> Result<PageRequest, ApiError> {
+        PageRequest::new(self.page, self.per_page).ok_or_else(|| {
+            ApiError::ValidationError(std::collections::HashMap::from([(
+                "pagination".to_owned(),
+                "page must be >= 1 and per_page must be between 1 and 100".to_owned(),
+            )]))
+        })
+    }
 }
 
 #[derive(Serialize)]
@@ -162,8 +193,31 @@ struct UserBrief {
 
 // ===== Gallery management types =====
 
+#[derive(Deserialize)]
+struct GalleryListQuery {
+    #[serde(default = "default_page")]
+    page: u32,
+    #[serde(default = "default_per_page")]
+    per_page: u32,
+    target_type: Option<GalleryTargetType>,
+    club_id: Option<Uuid>,
+}
+
+impl GalleryListQuery {
+    fn page_request(&self) -> Result<PageRequest, ApiError> {
+        PageRequest::new(self.page, self.per_page).ok_or_else(|| {
+            ApiError::ValidationError(std::collections::HashMap::from([(
+                "pagination".to_owned(),
+                "page must be >= 1 and per_page must be between 1 and 100".to_owned(),
+            )]))
+        })
+    }
+}
+
 #[derive(Deserialize, vrc_macros::Validate)]
 struct UploadGalleryRequest {
+    target_type: GalleryTargetType,
+    club_id: Option<Uuid>,
     #[validate(max_length = 500)]
     image_url: String,
     #[validate(max_length = 200)]
@@ -180,15 +234,47 @@ impl ValidatedPayload for UploadGalleryRequest {
     }
 }
 
+#[derive(Deserialize, vrc_macros::Validate)]
+struct UploadClubGalleryRequest {
+    #[validate(max_length = 500)]
+    image_url: String,
+    #[validate(max_length = 200)]
+    caption: Option<String>,
+}
+
+impl ValidatedPayload for UploadClubGalleryRequest {
+    fn validate_payload(&self) -> Result<(), HashMap<String, String>> {
+        self.validate()
+    }
+
+    fn validation_error(errors: HashMap<String, String>) -> ApiError {
+        ApiError::ValidationError(errors)
+    }
+}
+
 #[derive(Serialize)]
-struct GalleryUploadResponse {
+struct GalleryClubSummary {
     id: Uuid,
-    club_id: Uuid,
+    name: String,
+}
+
+#[derive(Serialize)]
+struct AdminGalleryView {
+    id: Uuid,
+    target_type: GalleryTargetType,
+    club_id: Option<Uuid>,
+    club: Option<GalleryClubSummary>,
     image_url: String,
     caption: Option<String>,
     status: GalleryImageStatus,
     uploaded_by: UserBrief,
     created_at: DateTime<Utc>,
+}
+
+#[derive(Serialize)]
+struct GalleryUploadBatchResponse {
+    uploaded_count: usize,
+    items: Vec<AdminGalleryView>,
 }
 
 #[derive(Deserialize)]
@@ -202,6 +288,208 @@ struct GalleryStatusResponse {
     status: GalleryImageStatus,
     reviewed_by: UserBrief,
     reviewed_at: DateTime<Utc>,
+}
+
+#[derive(sqlx::FromRow)]
+struct AdminGalleryRow {
+    id: Uuid,
+    target_type: GalleryTargetType,
+    club_id: Option<Uuid>,
+    club_name: Option<String>,
+    image_url: String,
+    caption: Option<String>,
+    status: GalleryImageStatus,
+    uploader_discord_id: String,
+    uploader_display_name: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(sqlx::FromRow)]
+struct ClubNameRow {
+    name: String,
+}
+
+struct PendingGalleryFile {
+    file_name: String,
+    bytes: Vec<u8>,
+}
+
+#[derive(sqlx::FromRow)]
+struct DeletedGalleryRow {
+    id: Uuid,
+    image_url: String,
+}
+
+fn validate_gallery_target_fields(
+    target_type: GalleryTargetType,
+    club_id: Option<Uuid>,
+) -> HashMap<String, String> {
+    let mut errors = HashMap::new();
+
+    match target_type {
+        GalleryTargetType::Community => {
+            if club_id.is_some() {
+                errors.insert(
+                    "club_id".to_owned(),
+                    "club_id must be omitted for community gallery images".to_owned(),
+                );
+            }
+        }
+        GalleryTargetType::Club => {
+            if club_id.is_none() {
+                errors.insert(
+                    "club_id".to_owned(),
+                    "club_id is required for club gallery images".to_owned(),
+                );
+            }
+        }
+    }
+
+    errors
+}
+
+fn validate_gallery_scope(body: &UploadGalleryRequest) -> Result<(), ApiError> {
+    let mut errors = validate_gallery_target_fields(body.target_type, body.club_id);
+
+    if !is_valid_https_url(&body.image_url) {
+        errors.insert(
+            "image_url".to_owned(),
+            "有効なHTTPS URLを入力してください".to_owned(),
+        );
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(ApiError::ValidationError(errors))
+    }
+}
+
+fn parse_gallery_target_type(value: &str) -> Result<GalleryTargetType, ApiError> {
+    match value.trim() {
+        "community" => Ok(GalleryTargetType::Community),
+        "club" => Ok(GalleryTargetType::Club),
+        _ => Err(ApiError::ValidationError(HashMap::from([(
+            "target_type".to_owned(),
+            "community か club を指定してください".to_owned(),
+        )]))),
+    }
+}
+
+fn parse_optional_uuid_field(field_name: &str, value: &str) -> Result<Option<Uuid>, ApiError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    Uuid::parse_str(trimmed)
+        .map(Some)
+        .map_err(|_| ApiError::ValidationError(HashMap::from([(
+            field_name.to_owned(),
+            "UUID を指定してください".to_owned(),
+        )])))
+}
+
+fn sanitize_upload_caption(value: String) -> Result<Option<String>, ApiError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.chars().count() > 200 {
+        return Err(ApiError::ValidationError(HashMap::from([(
+            "caption".to_owned(),
+            "キャプションは200文字以内で入力してください".to_owned(),
+        )])));
+    }
+
+    Ok(Some(trimmed.to_owned()))
+}
+
+fn extension_from_upload(content_type: Option<&str>, file_name: &str) -> Option<&'static str> {
+    match content_type {
+        Some("image/png") => return Some("png"),
+        Some("image/jpeg") => return Some("jpg"),
+        Some("image/webp") => return Some("webp"),
+        _ => {}
+    }
+
+    let extension = file_name.rsplit('.').next()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "png" => Some("png"),
+        "jpg" | "jpeg" => Some("jpg"),
+        "webp" => Some("webp"),
+        _ => None,
+    }
+}
+
+fn build_gallery_public_url(base_url: &str, file_name: &str) -> String {
+    format!("{}/gallery/{file_name}", base_url.trim_end_matches('/'))
+}
+
+fn local_gallery_file_name(image_url: &str, backend_base_url: &str) -> Option<String> {
+    let parsed = Url::parse(image_url).ok()?;
+    let backend_origin = Url::parse(backend_base_url).ok()?.origin().ascii_serialization();
+    if parsed.origin().ascii_serialization() != backend_origin {
+        return None;
+    }
+
+    let path = parsed.path();
+    let prefix = "/gallery/";
+    let file_name = path.strip_prefix(prefix)?;
+    let is_safe = !file_name.is_empty()
+        && !file_name.contains('/')
+        && !file_name.contains('\\')
+        && file_name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'));
+
+    is_safe.then(|| file_name.to_owned())
+}
+
+async fn cleanup_saved_gallery_files(paths: &[PathBuf]) {
+    for path in paths {
+        if let Err(error) = tokio::fs::remove_file(path).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(error = %error, path = %path.display(), "Failed to clean up gallery upload file");
+        }
+    }
+}
+
+async fn delete_local_gallery_file(state: &Arc<AppState>, image_url: &str) -> Result<(), std::io::Error> {
+    let Some(file_name) = local_gallery_file_name(image_url, &state.config.backend_base_url) else {
+        return Ok(());
+    };
+
+    let path = state.config.gallery_storage_dir.join(file_name);
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+async fn ensure_gallery_storage_dir(path: &StdPath) -> Result<(), ApiError> {
+    tokio::fs::create_dir_all(path)
+        .await
+        .map_err(|error| ApiError::Internal(format!("Failed to prepare gallery storage: {error}")))
+}
+
+fn to_admin_gallery_view(row: AdminGalleryRow) -> AdminGalleryView {
+    AdminGalleryView {
+        id: row.id,
+        target_type: row.target_type,
+        club_id: row.club_id,
+        club: row.club_id.zip(row.club_name).map(|(id, name)| GalleryClubSummary { id, name }),
+        image_url: row.image_url,
+        caption: row.caption,
+        status: row.status,
+        uploaded_by: UserBrief {
+            user_id: row.uploader_discord_id,
+            discord_display_name: row.uploader_display_name,
+        },
+        created_at: row.created_at,
+    }
 }
 
 // ===== SQL query helper row types =====
@@ -237,6 +525,7 @@ async fn list_users(
     _auth: AuthenticatedUser<Admin>,
     ValidatedQuery(query): ValidatedQuery<UserListQuery>,
 ) -> Result<PageResponse<AdminUserView>, ApiError> {
+    let page = query.page_request()?;
     let rows = sqlx::query_as!(
         AdminUserRow,
         r#"
@@ -251,8 +540,8 @@ async fn list_users(
         "#,
         query.status as Option<UserStatus>,
         query.role as Option<UserRole>,
-        query.page.limit(),
-        query.page.offset()
+        page.limit(),
+        page.offset()
     )
     .fetch_all(&state.db_pool)
     .await
@@ -286,7 +575,7 @@ async fn list_users(
         })
         .collect();
 
-    Ok(PageResponse::new(items, count, query.page.per_page()))
+    Ok(PageResponse::new(items, count, page.per_page()))
 }
 
 /// Validate role change authorization rules per spec:
@@ -451,6 +740,7 @@ async fn list_reports(
     _auth: AuthenticatedUser<Staff>,
     ValidatedQuery(query): ValidatedQuery<ReportListQuery>,
 ) -> Result<PageResponse<AdminReportView>, ApiError> {
+    let page = query.page_request()?;
     let rows = sqlx::query_as::<_, ReportRow>(
         r#"
         SELECT r.id,
@@ -469,8 +759,8 @@ async fn list_reports(
         "#,
     )
     .bind(query.status)
-    .bind(query.page.limit())
-    .bind(query.page.offset())
+    .bind(page.limit())
+    .bind(page.offset())
     .fetch_all(&state.db_pool)
     .await
     .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -501,7 +791,65 @@ async fn list_reports(
         })
         .collect();
 
-    Ok(PageResponse::new(items, count, query.page.per_page()))
+    Ok(PageResponse::new(items, count, page.per_page()))
+}
+
+#[vrc_macros::handler(method = GET, path = "/api/v1/internal/admin/galleries", role = Staff, rate_limit = "internal", summary = "List gallery images")]
+async fn list_galleries(
+    State(state): State<Arc<AppState>>,
+    _auth: AuthenticatedUser<Staff>,
+    ValidatedQuery(query): ValidatedQuery<GalleryListQuery>,
+) -> Result<PageResponse<AdminGalleryView>, ApiError> {
+    let page = query.page_request()?;
+
+    let rows = sqlx::query_as::<_, AdminGalleryRow>(
+        r#"
+        SELECT g.id,
+               g.target_type,
+               g.club_id,
+               c.name as club_name,
+               g.image_url,
+               g.caption,
+               g.status,
+               u.discord_id as uploader_discord_id,
+               u.discord_display_name as uploader_display_name,
+               g.created_at
+        FROM gallery_images g
+        JOIN users u ON u.id = g.uploaded_by_user_id
+        LEFT JOIN clubs c ON c.id = g.club_id
+        WHERE ($1::gallery_target_type IS NULL OR g.target_type = $1)
+          AND ($2::uuid IS NULL OR g.club_id = $2)
+        ORDER BY g.created_at DESC
+        LIMIT $3 OFFSET $4
+        "#,
+    )
+    .bind(query.target_type)
+    .bind(query.club_id)
+    .bind(page.limit())
+    .bind(page.offset())
+    .fetch_all(&state.db_pool)
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    let count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)
+        FROM gallery_images g
+        WHERE ($1::gallery_target_type IS NULL OR g.target_type = $1)
+          AND ($2::uuid IS NULL OR g.club_id = $2)
+        "#,
+    )
+    .bind(query.target_type)
+    .bind(query.club_id)
+    .fetch_one(&state.db_pool)
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(PageResponse::new(
+        rows.into_iter().map(to_admin_gallery_view).collect(),
+        count,
+        page.per_page(),
+    ))
 }
 
 #[vrc_macros::handler(method = PATCH, path = "/api/v1/internal/admin/reports/{id}", role = Staff, rate_limit = "internal", summary = "Resolve report")]
@@ -643,70 +991,288 @@ async fn create_club(
     ))
 }
 
-#[vrc_macros::handler(method = POST, path = "/api/v1/internal/admin/clubs/{id}/gallery", role = Staff, rate_limit = "internal", summary = "Upload gallery image")]
-async fn upload_gallery_image(
+async fn create_gallery_image(
+    state: &Arc<AppState>,
+    auth: &AuthenticatedUser<Staff>,
+    body: UploadGalleryRequest,
+) -> Result<(StatusCode, Json<AdminGalleryView>), ApiError> {
+    validate_gallery_scope(&body)?;
+
+    let club_name = ensure_gallery_target_exists(state, body.club_id).await?;
+
+    let mut transaction = state
+        .db_pool
+        .begin()
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+
+    let view = insert_gallery_image_tx(
+        &mut transaction,
+        auth,
+        body.target_type,
+        body.club_id,
+        club_name,
+        &body.image_url,
+        body.caption.as_deref(),
+    )
+    .await?;
+
+    transaction
+        .commit()
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+
+    Ok((StatusCode::CREATED, Json(view)))
+}
+
+async fn ensure_gallery_target_exists(
+    state: &Arc<AppState>,
+    club_id: Option<Uuid>,
+) -> Result<Option<String>, ApiError> {
+    let Some(club_id) = club_id else {
+        return Ok(None);
+    };
+
+    let club = sqlx::query_as::<_, ClubNameRow>(r#"SELECT name FROM clubs WHERE id = $1"#)
+        .bind(club_id)
+        .fetch_optional(&state.db_pool)
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+
+    club.map(|record| record.name).ok_or(ApiError::ClubNotFound).map(Some)
+}
+
+async fn insert_gallery_image_tx(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    auth: &AuthenticatedUser<Staff>,
+    target_type: GalleryTargetType,
+    club_id: Option<Uuid>,
+    club_name: Option<String>,
+    image_url: &str,
+    caption: Option<&str>,
+) -> Result<AdminGalleryView, ApiError> {
+    let row = sqlx::query_as::<_, AdminGalleryRow>(
+        r#"
+        INSERT INTO gallery_images (target_type, club_id, uploaded_by_user_id, image_url, caption, status)
+        VALUES ($1, $2, $3, $4, $5, 'pending')
+        RETURNING id,
+                  target_type,
+                  club_id,
+                  NULL::text as club_name,
+                  image_url,
+                  caption,
+                  status,
+                  $6::text as uploader_discord_id,
+                  $7::text as uploader_display_name,
+                  created_at
+        "#,
+    )
+    .bind(target_type)
+    .bind(club_id)
+    .bind(auth.user.id)
+    .bind(image_url)
+    .bind(caption)
+    .bind(&auth.user.discord_id)
+    .bind(&auth.user.discord_display_name)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(|error| ApiError::Internal(error.to_string()))?;
+
+    Ok(to_admin_gallery_view(AdminGalleryRow { club_name, ..row }))
+}
+
+#[vrc_macros::handler(method = POST, path = "/api/v1/internal/admin/gallery/files", role = Staff, rate_limit = "internal", summary = "Upload gallery image files")]
+async fn upload_gallery_files(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedUser<Staff>,
-    Path(club_id): Path<Uuid>,
-    ValidatedJson(body): ValidatedJson<UploadGalleryRequest>,
-) -> Result<(StatusCode, Json<GalleryUploadResponse>), ApiError> {
-    let mut errors = HashMap::new();
+    mut multipart: Multipart,
+) -> Result<(StatusCode, Json<GalleryUploadBatchResponse>), ApiError> {
+    let mut target_type = None;
+    let mut club_id = None;
+    let mut caption = None;
+    let mut pending_files = Vec::new();
 
-    // Stricter URL validation beyond basic length check
-    if !is_valid_https_url(&body.image_url) {
-        errors.insert(
-            "image_url".to_owned(),
-            "有効なHTTPS URLを入力してください".to_owned(),
-        );
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| ApiError::ValidationError(HashMap::from([(
+            "files".to_owned(),
+            format!("アップロードデータを読み取れませんでした: {error}"),
+        )])))?
+    {
+        let field_name = field.name().unwrap_or_default().to_owned();
+
+        match field_name.as_str() {
+            "target_type" => {
+                let value = field
+                    .text()
+                    .await
+                    .map_err(|error| ApiError::ValidationError(HashMap::from([(
+                        "target_type".to_owned(),
+                        format!("掲載先を読み取れませんでした: {error}"),
+                    )])))?;
+                target_type = Some(parse_gallery_target_type(&value)?);
+            }
+            "club_id" => {
+                let value = field
+                    .text()
+                    .await
+                    .map_err(|error| ApiError::ValidationError(HashMap::from([(
+                        "club_id".to_owned(),
+                        format!("部活IDを読み取れませんでした: {error}"),
+                    )])))?;
+                club_id = parse_optional_uuid_field("club_id", &value)?;
+            }
+            "caption" => {
+                let value = field
+                    .text()
+                    .await
+                    .map_err(|error| ApiError::ValidationError(HashMap::from([(
+                        "caption".to_owned(),
+                        format!("キャプションを読み取れませんでした: {error}"),
+                    )])))?;
+                caption = sanitize_upload_caption(value)?;
+            }
+            "files" => {
+                let file_name = field.file_name().unwrap_or("image").to_owned();
+                let extension = extension_from_upload(
+                    field.content_type(),
+                    &file_name,
+                )
+                    .ok_or_else(|| ApiError::ValidationError(HashMap::from([(
+                        "files".to_owned(),
+                        format!("{file_name} は PNG/JPG/WebP のみアップロードできます"),
+                    )])))?;
+                let bytes = field
+                    .bytes()
+                    .await
+                    .map_err(|error| ApiError::ValidationError(HashMap::from([(
+                        "files".to_owned(),
+                        format!("{file_name} を読み取れませんでした: {error}"),
+                    )])))?;
+
+                if bytes.len() > state.config.gallery_max_upload_bytes {
+                    return Err(ApiError::ValidationError(HashMap::from([(
+                        "files".to_owned(),
+                        format!(
+                            "{file_name} はサイズ上限を超えています。最大 {} MB です",
+                            state.config.gallery_max_upload_bytes / (1024 * 1024)
+                        ),
+                    )])));
+                }
+
+                let stored_file_name = format!("{}.{}", ulid::Ulid::new(), extension);
+                pending_files.push(PendingGalleryFile {
+                    file_name: stored_file_name,
+                    bytes: bytes.to_vec(),
+                });
+            }
+            _ => {
+                let _ = field.bytes().await;
+            }
+        }
     }
 
+    let target_type = target_type.ok_or_else(|| ApiError::ValidationError(HashMap::from([(
+        "target_type".to_owned(),
+        "掲載先を指定してください".to_owned(),
+    )])))?;
+
+    let errors = validate_gallery_target_fields(target_type, club_id);
     if !errors.is_empty() {
         return Err(ApiError::ValidationError(errors));
     }
 
-    // Verify club exists
-    let club_exists = sqlx::query_scalar!(
-        r#"SELECT EXISTS(SELECT 1 FROM clubs WHERE id = $1) as "exists!: bool""#,
-        club_id
-    )
-    .fetch_one(&state.db_pool)
-    .await
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    if !club_exists {
-        return Err(ApiError::ClubNotFound);
+    if pending_files.is_empty() {
+        return Err(ApiError::ValidationError(HashMap::from([(
+            "files".to_owned(),
+            "少なくとも1枚の画像を選択してください".to_owned(),
+        )])));
     }
 
-    let image = sqlx::query!(
-        r#"
-        INSERT INTO gallery_images (club_id, uploaded_by_user_id, image_url, caption, status)
-        VALUES ($1, $2, $3, $4, 'pending')
-        RETURNING id, created_at
-        "#,
-        club_id,
-        auth.user.id,
-        body.image_url,
-        body.caption,
-    )
-    .fetch_one(&state.db_pool)
-    .await
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    ensure_gallery_storage_dir(&state.config.gallery_storage_dir).await?;
+    let club_name = ensure_gallery_target_exists(&state, club_id).await?;
+
+    let mut saved_paths = Vec::with_capacity(pending_files.len());
+    let mut public_urls = Vec::with_capacity(pending_files.len());
+    for file in &pending_files {
+        let path = state.config.gallery_storage_dir.join(&file.file_name);
+        if let Err(error) = tokio::fs::write(&path, &file.bytes).await {
+            cleanup_saved_gallery_files(&saved_paths).await;
+            return Err(ApiError::Internal(format!("Failed to save gallery upload: {error}")));
+        }
+        saved_paths.push(path);
+        public_urls.push(build_gallery_public_url(&state.config.backend_base_url, &file.file_name));
+    }
+
+    let mut transaction = state
+        .db_pool
+        .begin()
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+
+    let mut items = Vec::with_capacity(public_urls.len());
+    for image_url in &public_urls {
+        match insert_gallery_image_tx(
+            &mut transaction,
+            &auth,
+            target_type,
+            club_id,
+            club_name.clone(),
+            image_url,
+            caption.as_deref(),
+        )
+        .await
+        {
+            Ok(view) => items.push(view),
+            Err(error) => {
+                cleanup_saved_gallery_files(&saved_paths).await;
+                return Err(error);
+            }
+        }
+    }
+
+    if let Err(error) = transaction.commit().await {
+        cleanup_saved_gallery_files(&saved_paths).await;
+        return Err(ApiError::Internal(error.to_string()));
+    }
 
     Ok((
         StatusCode::CREATED,
-        Json(GalleryUploadResponse {
-            id: image.id,
-            club_id,
-            image_url: body.image_url,
-            caption: body.caption,
-            status: GalleryImageStatus::Pending,
-            uploaded_by: UserBrief {
-                user_id: auth.user.discord_id.clone(),
-                discord_display_name: auth.user.discord_display_name.clone(),
-            },
-            created_at: image.created_at,
+        Json(GalleryUploadBatchResponse {
+            uploaded_count: items.len(),
+            items,
         }),
     ))
+}
+
+#[vrc_macros::handler(method = POST, path = "/api/v1/internal/admin/gallery", role = Staff, rate_limit = "internal", summary = "Create gallery image")]
+async fn upload_gallery_image(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedUser<Staff>,
+    ValidatedJson(body): ValidatedJson<UploadGalleryRequest>,
+) -> Result<(StatusCode, Json<AdminGalleryView>), ApiError> {
+    create_gallery_image(&state, &auth, body).await
+}
+
+#[vrc_macros::handler(method = POST, path = "/api/v1/internal/admin/clubs/{id}/gallery", role = Staff, rate_limit = "internal", summary = "Upload gallery image")]
+async fn upload_club_gallery_image(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedUser<Staff>,
+    Path(club_id): Path<Uuid>,
+    ValidatedJson(body): ValidatedJson<UploadClubGalleryRequest>,
+) -> Result<(StatusCode, Json<AdminGalleryView>), ApiError> {
+    create_gallery_image(
+        &state,
+        &auth,
+        UploadGalleryRequest {
+            target_type: GalleryTargetType::Club,
+            club_id: Some(club_id),
+            image_url: body.image_url,
+            caption: body.caption,
+        },
+    )
+    .await
 }
 
 #[vrc_macros::handler(method = PATCH, path = "/api/v1/internal/admin/gallery/{image_id}/status", role = Staff, rate_limit = "internal", summary = "Update gallery status")]
@@ -753,6 +1319,38 @@ async fn update_gallery_status(
     }))
 }
 
+#[vrc_macros::handler(method = DELETE, path = "/api/v1/internal/admin/gallery/{image_id}", role = Staff, rate_limit = "internal", summary = "Delete gallery image")]
+async fn delete_gallery_image(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedUser<Staff>,
+    Path(image_id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let deleted = sqlx::query_as::<_, DeletedGalleryRow>(
+        r#"
+        DELETE FROM gallery_images
+        WHERE id = $1
+        RETURNING id, image_url
+        "#,
+    )
+    .bind(image_id)
+    .fetch_optional(&state.db_pool)
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?
+    .ok_or(ApiError::GalleryImageNotFound)?;
+
+    if let Err(error) = delete_local_gallery_file(&state, &deleted.image_url).await {
+        tracing::warn!(error = %error, image_id = %deleted.id, "Failed to delete local gallery file");
+    }
+
+    tracing::info!(
+        actor_id = %auth.user.id,
+        image_id = %deleted.id,
+        "Gallery image deleted"
+    );
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/users", get(list_users))
@@ -760,8 +1358,12 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/users/{id}/status", patch(change_user_status))
         .route("/reports", get(list_reports))
         .route("/reports/{id}", patch(resolve_report))
+        .route("/galleries", get(list_galleries))
         .route("/clubs", post(create_club))
-        .route("/clubs/{id}/gallery", post(upload_gallery_image))
+        .route("/gallery", post(upload_gallery_image))
+        .route("/gallery/files", post(upload_gallery_files))
+        .route("/clubs/{id}/gallery", post(upload_club_gallery_image))
+        .route("/gallery/{image_id}", delete(delete_gallery_image))
         .route("/gallery/{image_id}/status", patch(update_gallery_status))
 }
 
