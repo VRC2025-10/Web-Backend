@@ -26,6 +26,7 @@ pub struct AppConfig {
     pub backend_base_url: String,
     pub frontend_origin: String,
     pub frontend_origin_header: HeaderValue,
+    pub cookie_domain: Option<String>,
     pub gallery_storage_dir: PathBuf,
     pub gallery_max_upload_bytes: usize,
 
@@ -71,6 +72,7 @@ impl AppConfig {
             backend_base_url,
             frontend_origin,
             frontend_origin_header,
+            cookie_domain: optional_env("COOKIE_DOMAIN")?,
             gallery_storage_dir: parse_path_env(
                 "GALLERY_STORAGE_DIR",
                 "/var/lib/vrc/gallery",
@@ -592,6 +594,7 @@ mod tests {
         assert_eq!(config.session_max_age_secs, 604_800);
         assert_eq!(config.session_cleanup_interval_secs, 3600);
         assert_eq!(config.event_archival_interval_secs, 3600);
+        assert_eq!(config.cookie_domain, None);
         assert!(config.cookie_secure);
         assert!(!config.trust_x_forwarded_for);
         assert_eq!(
@@ -636,6 +639,7 @@ mod tests {
             backend_base_url: "https://backend.example".to_owned(),
             frontend_origin: "https://frontend.example".to_owned(),
             frontend_origin_header: "https://frontend.example".parse().expect("valid header"),
+            cookie_domain: None,
             gallery_storage_dir: std::env::temp_dir().join("vrc-gallery-test-config"),
             gallery_max_upload_bytes: 10 * 1024 * 1024,
             session_secret: SecretString::from("abcdefghijklmnopqrstuvwxyz012345".to_owned()),

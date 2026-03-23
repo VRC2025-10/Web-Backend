@@ -324,12 +324,18 @@ async fn logout(
         }
     }
 
-    let remove_cookie = axum_extra::extract::cookie::Cookie::build(("session_id", ""))
+    let mut remove_cookie = axum_extra::extract::cookie::Cookie::build(("session_id", ""))
         .http_only(true)
         .secure(state.config.cookie_secure)
         .same_site(axum_extra::extract::cookie::SameSite::Lax)
         .path("/")
         .max_age(time::Duration::ZERO);
+
+    if let Some(cookie_domain) = state.config.cookie_domain.clone() {
+        remove_cookie = remove_cookie.domain(cookie_domain);
+    }
+
+    let remove_cookie = remove_cookie.build();
 
     Ok((jar.remove(remove_cookie), StatusCode::NO_CONTENT))
 }

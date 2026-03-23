@@ -337,12 +337,18 @@ async fn callback(
     }
 
     // 8. Clear oauth_state cookie and set session cookie
-    let session_cookie = Cookie::build(("session_id", token_b64))
+    let mut session_cookie = Cookie::build(("session_id", token_b64))
         .http_only(true)
         .secure(state.config.cookie_secure)
         .same_site(axum_extra::extract::cookie::SameSite::Lax)
         .path("/")
         .max_age(time::Duration::seconds(state.config.session_max_age_secs));
+
+    if let Some(cookie_domain) = state.config.cookie_domain.clone() {
+        session_cookie = session_cookie.domain(cookie_domain);
+    }
+
+    let session_cookie = session_cookie.build();
 
     let redirect_to = validate_redirect(&payload.redirect_to);
     let redirect_url = format!("{frontend}{redirect_to}");

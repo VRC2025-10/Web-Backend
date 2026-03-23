@@ -77,6 +77,7 @@ POSTGRES_DB=vrc_class_reunion
 DATABASE_URL=postgres://vrc_app:<url-encoded-password>@db:5432/vrc_class_reunion
 DISCORD_REDIRECT_URI=https://vrcapi.arivell-vm.com/api/v1/auth/discord/callback
 FRONTEND_ORIGIN=https://vrc10.arivell-vm.com
+COOKIE_DOMAIN=arivell-vm.com
 COOKIE_SECURE=true
 TRUST_X_FORWARDED_FOR=true
 EOF
@@ -92,6 +93,7 @@ curl -s https://vrcapi.arivell-vm.com/health | jq .
 - Cloudflare の WAF や Bot Fight Mode で Discord の OAuth コールバックを遮断しないでください
 - `DATABASE_URL` のホストは `db` を使います
 - `POSTGRES_PASSWORD` に記号が含まれる場合は、`DATABASE_URL` 側では URL エンコードしてください
+- frontend と API を別サブドメインで運用する場合は、`COOKIE_DOMAIN=arivell-vm.com` のように共有親ドメインを設定してください
 
 ## アップデート
 

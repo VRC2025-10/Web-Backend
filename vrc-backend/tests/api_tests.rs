@@ -81,6 +81,7 @@ fn test_config() -> AppConfig {
         backend_base_url: "http://localhost:3000".to_owned(),
         frontend_origin: "http://localhost:5173".to_owned(),
         frontend_origin_header: HeaderValue::from_static("http://localhost:5173"),
+        cookie_domain: None,
         gallery_storage_dir,
         gallery_max_upload_bytes: 10 * 1024 * 1024,
         session_secret: "test_secret_key_at_least_32_bytes_long".to_owned().into(),
