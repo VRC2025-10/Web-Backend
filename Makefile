@@ -135,7 +135,7 @@ docker-logs: ## Show production container logs
 
 .PHONY: sqlx-prepare
 sqlx-prepare: ## Regenerate SQLx offline query cache
-	cargo sqlx prepare --workspace
+	SQLX_OFFLINE=false cargo sqlx prepare --workspace
 
 # ── Maintenance ──────────────────────────────────────────────────────────────
 
