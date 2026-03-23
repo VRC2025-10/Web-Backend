@@ -8,6 +8,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use axum::extract::ConnectInfo;
 use axum::body::Body;
 use axum::http::HeaderValue;
 use axum::http::{Method, Request, Response, StatusCode};
@@ -66,6 +67,8 @@ async fn setup_pool() -> TestResult<PgPool> {
 }
 
 fn test_config() -> AppConfig {
+    let gallery_storage_dir = std::env::temp_dir().join(format!("vrc-gallery-test-{}", Uuid::new_v4()));
+
     AppConfig {
         bind_address: "127.0.0.1:0".to_owned(),
         database_url: std::env::var("DATABASE_URL").unwrap_or_else(|_| {
@@ -78,6 +81,8 @@ fn test_config() -> AppConfig {
         backend_base_url: "http://localhost:3000".to_owned(),
         frontend_origin: "http://localhost:5173".to_owned(),
         frontend_origin_header: HeaderValue::from_static("http://localhost:5173"),
+        gallery_storage_dir,
+        gallery_max_upload_bytes: 10 * 1024 * 1024,
         session_secret: "test_secret_key_at_least_32_bytes_long".to_owned().into(),
         system_api_token: "test_system_token_at_least_32_chars_long".to_owned().into(),
         session_max_age_secs: 604_800,
@@ -180,6 +185,57 @@ fn empty_request(method: Method, uri: &str) -> TestResult<Request<Body>> {
         .method(method)
         .uri(uri)
         .body(Body::empty())?)
+}
+
+fn request_with_connect_info(method: Method, uri: &str, ip_octet: u8) -> TestResult<Request<Body>> {
+    let mut request = Request::builder().method(method).uri(uri).body(Body::empty())?;
+    request.extensions_mut().insert(ConnectInfo(std::net::SocketAddr::from((
+        std::net::Ipv4Addr::new(127, 0, 0, ip_octet),
+        30_000 + u16::from(ip_octet),
+    ))));
+    Ok(request)
+}
+
+fn multipart_request(
+    uri: &str,
+    session: &str,
+    text_fields: &[(&str, &str)],
+    file_fields: &[(&str, &str, &str, &[u8])],
+) -> TestResult<Request<Body>> {
+    let boundary = "x-vrc-boundary";
+    let mut body = Vec::new();
+
+    for (name, value) in text_fields {
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
+        );
+        body.extend_from_slice(value.as_bytes());
+        body.extend_from_slice(b"\r\n");
+    }
+
+    for (name, file_name, content_type, bytes) in file_fields {
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!(
+                "Content-Disposition: form-data; name=\"{name}\"; filename=\"{file_name}\"\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(format!("Content-Type: {content_type}\r\n\r\n").as_bytes());
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(b"\r\n");
+    }
+
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+
+    Ok(Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header("Cookie", format!("session_id={session}"))
+        .header("Origin", "http://localhost:5173")
+        .header("Content-Type", format!("multipart/form-data; boundary={boundary}"))
+        .body(Body::from(body))?)
 }
 
 // ===== Tests =====
@@ -586,6 +642,161 @@ async fn test_create_club_report_normalizes_uuid_for_duplicate_detection() -> Te
 }
 
 #[tokio::test]
+async fn test_staff_can_upload_community_gallery_image_and_list_admin_galleries() -> TestResult {
+    let pool = setup_pool().await?;
+    let staff_did = unique_discord_id();
+    let staff_id = create_test_user(&pool, &staff_did, "staff").await?;
+    let session = create_test_session(&pool, staff_id).await?;
+    let app = build_app(pool)?;
+
+    let body = serde_json::json!({
+        "target_type": "community",
+        "image_url": "https://example.com/gallery/community.webp",
+        "caption": "Community memory"
+    });
+
+    let upload = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/internal/admin/gallery")
+                .header("Cookie", format!("session_id={session}"))
+                .header("Origin", "http://localhost:5173")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body)?))?,
+        )
+        .await?;
+
+    assert_eq!(upload.status(), StatusCode::CREATED);
+    let upload_body = parse_json(upload).await?;
+    assert_eq!(upload_body["target_type"], "community");
+    assert!(upload_body["club"].is_null());
+
+    let list = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/v1/internal/admin/galleries?target_type=community")
+                .header("Cookie", format!("session_id={session}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(list.status(), StatusCode::OK);
+    let list_body = parse_json(list).await?;
+    assert_eq!(list_body["items"][0]["target_type"], "community");
+    assert_eq!(list_body["items"][0]["image_url"], body["image_url"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_staff_can_upload_gallery_files_and_backend_serves_them() -> TestResult {
+    let pool = setup_pool().await?;
+    let staff_did = unique_discord_id();
+    let staff_id = create_test_user(&pool, &staff_did, "staff").await?;
+    let session = create_test_session(&pool, staff_id).await?;
+    let app = build_app(pool)?;
+
+    let upload = app
+        .clone()
+        .oneshot(multipart_request(
+            "/api/v1/internal/admin/gallery/files",
+            &session,
+            &[("target_type", "community"), ("caption", "Batch upload")],
+            &[("files", "photo.webp", "image/webp", b"fake-webp-binary")],
+        )?)
+        .await?;
+
+    assert_eq!(upload.status(), StatusCode::CREATED);
+    let upload_body = parse_json(upload).await?;
+    assert_eq!(upload_body["uploaded_count"], 1);
+
+    let image_url = upload_body["items"][0]["image_url"]
+        .as_str()
+        .ok_or("missing uploaded image url")?;
+    let image_id = upload_body["items"][0]["id"]
+        .as_str()
+        .ok_or("missing uploaded image id")?;
+    let image_path = image_url
+        .strip_prefix("http://localhost:3000")
+        .ok_or("uploaded image url must use backend base url")?;
+
+    let file_response = app
+        .clone()
+        .oneshot(empty_request(Method::GET, image_path)?)
+        .await?;
+    assert_eq!(file_response.status(), StatusCode::OK);
+    let file_bytes = axum::body::to_bytes(file_response.into_body(), usize::MAX).await?;
+    assert_eq!(file_bytes.as_ref(), b"fake-webp-binary");
+
+    let delete_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(format!("/api/v1/internal/admin/gallery/{image_id}"))
+                .header("Cookie", format!("session_id={session}"))
+                .header("Origin", "http://localhost:5173")
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+
+    let missing_response = app
+        .oneshot(empty_request(Method::GET, image_path)?)
+        .await?;
+    assert_eq!(missing_response.status(), StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_public_club_gallery_excludes_community_images() -> TestResult {
+    let pool = setup_pool().await?;
+    let staff_did = unique_discord_id();
+    let staff_id = create_test_user(&pool, &staff_did, "staff").await?;
+
+    let club_id = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO clubs (name, description_markdown, description_html, owner_user_id) VALUES ($1, '', '', $2) RETURNING id"
+    )
+    .bind("Scoped Gallery Club")
+    .bind(staff_id)
+    .fetch_one(&pool)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO gallery_images (target_type, club_id, uploaded_by_user_id, image_url, caption, status) VALUES ('community', NULL, $1, $2, NULL, 'approved')"
+    )
+    .bind(staff_id)
+    .bind("https://example.com/gallery/community-only.webp")
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO gallery_images (target_type, club_id, uploaded_by_user_id, image_url, caption, status) VALUES ('club', $1, $2, $3, NULL, 'approved')"
+    )
+    .bind(club_id)
+    .bind(staff_id)
+    .bind("https://example.com/gallery/club-only.webp")
+    .execute(&pool)
+    .await?;
+
+    let app = build_app(pool)?;
+    let response = app
+        .oneshot(empty_request(
+            Method::GET,
+            &format!("/api/v1/public/clubs/{club_id}/gallery"),
+        )?)
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = parse_json(response).await?;
+    assert_eq!(body["total_count"], 1);
+    assert_eq!(body["items"][0]["image_url"], "https://example.com/gallery/club-only.webp");
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_logout_invalidates_session_and_clears_cookie() -> TestResult {
     let pool = setup_pool().await?;
     let did = unique_discord_id();
@@ -777,5 +988,130 @@ async fn test_system_endpoint_requires_bearer_token() -> TestResult {
         .await?;
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    Ok(())
+}
+
+fn percentile_micros(samples: &[u128], percentile: f64) -> u128 {
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+
+    let index = ((sorted.len().saturating_sub(1)) as f64 * percentile).round() as usize;
+    sorted[index]
+}
+
+fn mean_micros(samples: &[u128]) -> f64 {
+    let total: u128 = samples.iter().copied().sum();
+    total as f64 / samples.len() as f64
+}
+
+#[tokio::test]
+#[ignore = "perf smoke benchmark"]
+async fn perf_public_member_endpoints_smoke() -> TestResult {
+    let pool = setup_pool().await?;
+
+    sqlx::query(
+        r#"
+        TRUNCATE TABLE
+            reports,
+            gallery_images,
+            club_members,
+            clubs,
+            event_tag_mappings,
+            events,
+            sessions,
+            profiles,
+            users
+        CASCADE
+        "#,
+    )
+    .execute(&pool)
+    .await?;
+
+    for index in 0..400 {
+        let discord_id = unique_discord_id();
+        let user_id = create_test_user(&pool, &discord_id, "member").await?;
+        create_test_profile(&pool, user_id, &format!("PerfUser{index}"), true).await?;
+    }
+
+    let mut sessions = Vec::with_capacity(50);
+    for index in 0..50 {
+        let auth_discord_id = unique_discord_id();
+        let auth_user_id = create_test_user(&pool, &auth_discord_id, "member").await?;
+        create_test_profile(&pool, auth_user_id, &format!("PerfProfile{index}"), true).await?;
+        sessions.push(create_test_session(&pool, auth_user_id).await?);
+    }
+
+    let app = build_app(pool)?;
+
+    for iteration in 0..5 {
+        let response = app
+            .clone()
+            .oneshot(request_with_connect_info(
+                Method::GET,
+                "/api/v1/public/members?per_page=24",
+                (iteration + 1) as u8,
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/v1/internal/me/profile")
+                    .header("Cookie", format!("session_id={}", sessions[iteration]))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let mut public_members_samples = Vec::with_capacity(50);
+    let mut own_profile_samples = Vec::with_capacity(50);
+
+    for iteration in 0..50 {
+        let started = Instant::now();
+        let response = app
+            .clone()
+            .oneshot(request_with_connect_info(
+                Method::GET,
+                "/api/v1/public/members?per_page=24",
+                (iteration % 200 + 1) as u8,
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        public_members_samples.push(started.elapsed().as_micros());
+
+        let started = Instant::now();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/v1/internal/me/profile")
+                    .header("Cookie", format!("session_id={}", sessions[iteration]))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        own_profile_samples.push(started.elapsed().as_micros());
+    }
+
+    println!(
+        "PERF public_members mean_us={:.1} p50_us={} p95_us={} samples={}",
+        mean_micros(&public_members_samples),
+        percentile_micros(&public_members_samples, 0.50),
+        percentile_micros(&public_members_samples, 0.95),
+        public_members_samples.len()
+    );
+    println!(
+        "PERF own_profile mean_us={:.1} p50_us={} p95_us={} samples={}",
+        mean_micros(&own_profile_samples),
+        percentile_micros(&own_profile_samples, 0.50),
+        percentile_micros(&own_profile_samples, 0.95),
+        own_profile_samples.len()
+    );
+
     Ok(())
 }
