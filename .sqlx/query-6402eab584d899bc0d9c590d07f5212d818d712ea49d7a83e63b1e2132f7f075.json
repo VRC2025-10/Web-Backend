@@ -1,0 +1,65 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n         SELECT c.id, c.name, c.description_html, c.cover_image_url,\n               u.discord_id as owner_discord_id,\n               u.discord_display_name as owner_display_name,\n               COUNT(cm.user_id) as \"member_count!: i64\",\n               c.created_at\n        FROM clubs c\n        JOIN users u ON u.id = c.owner_user_id\n        LEFT JOIN club_members cm ON cm.club_id = c.id\n         GROUP BY c.id, c.name, c.description_html, c.cover_image_url, u.discord_id, u.discord_display_name, c.created_at\n        ORDER BY c.name\n        LIMIT $1 OFFSET $2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "description_html",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "cover_image_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "owner_discord_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "owner_display_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "member_count!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      null,
+      false
+    ]
+  },
+  "hash": "6402eab584d899bc0d9c590d07f5212d818d712ea49d7a83e63b1e2132f7f075"
+}
