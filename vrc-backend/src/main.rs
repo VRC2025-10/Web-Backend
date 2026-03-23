@@ -49,8 +49,8 @@ enum StartupError {
     TcpBind(#[source] std::io::Error),
     #[error("Server error: {0}")]
     Server(#[source] std::io::Error),
-    #[error("Failed to bootstrap super admin: {0}")]
-    SuperAdminBootstrap(#[source] sqlx::Error),
+    #[error("Failed to sync super admin configuration: {0}")]
+    SuperAdminSync(#[source] sqlx::Error),
 }
 
 async fn run() -> Result<(), StartupError> {
@@ -88,9 +88,15 @@ async fn run() -> Result<(), StartupError> {
         .await
         .map_err(StartupError::DatabaseMigration)?;
 
-    // Bootstrap every configured super admin before serving traffic.
-    for discord_id in config.super_admin_discord_ids() {
-        bootstrap_super_admin(&db_pool, discord_id).await?;
+    let super_admin_ids = config.super_admin_discord_ids();
+    if !super_admin_ids.is_empty() {
+        tracing::info!(count = super_admin_ids.len(), "Loaded super admin login allowlist");
+    }
+
+    // Remove any legacy synthetic bootstrap user rows. Super-admin elevation
+    // now happens on real Discord login in the OAuth callback.
+    for discord_id in super_admin_ids {
+        cleanup_legacy_bootstrap_super_admin(&db_pool, discord_id).await?;
     }
 
     let http_client = reqwest::Client::builder()
@@ -195,50 +201,69 @@ async fn shutdown_signal() {
     tokio::time::sleep(Duration::from_secs(30)).await;
 }
 
-async fn bootstrap_super_admin(
+async fn cleanup_legacy_bootstrap_super_admin(
     db_pool: &sqlx::PgPool,
     discord_id: &str,
 ) -> Result<(), StartupError> {
     let mut transaction = db_pool
         .begin()
         .await
-        .map_err(StartupError::SuperAdminBootstrap)?;
+        .map_err(StartupError::SuperAdminSync)?;
 
-    // FR-AUTH-008: Upsert user with super_admin role
     let user_id = sqlx::query_scalar::<_, uuid::Uuid>(
         r"
-        INSERT INTO users (discord_id, discord_username, discord_display_name, role, status)
-        VALUES ($1, 'SuperAdmin', 'SuperAdmin', 'super_admin', 'active')
-        ON CONFLICT (discord_id) DO UPDATE SET
-            role = 'super_admin',
-            status = 'active',
-            updated_at = NOW()
-        RETURNING id
+        SELECT u.id
+        FROM users u
+        JOIN profiles p ON p.user_id = u.id
+        WHERE u.discord_id = $1
+          AND u.role = 'super_admin'
+          AND u.status = 'active'
+          AND u.discord_username = 'SuperAdmin'
+          AND u.discord_display_name = 'SuperAdmin'
+          AND u.discord_avatar_hash IS NULL
+          AND u.avatar_url IS NULL
+          AND p.nickname = 'SuperAdmin'
+          AND p.bio_markdown = ''
+          AND p.bio_html = ''
+          AND p.avatar_url IS NULL
+          AND p.is_public = false
+          AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.user_id = u.id)
+          AND NOT EXISTS (SELECT 1 FROM reports r WHERE r.reporter_user_id = u.id)
+          AND NOT EXISTS (SELECT 1 FROM clubs c WHERE c.owner_user_id = u.id)
+          AND NOT EXISTS (SELECT 1 FROM club_members cm WHERE cm.user_id = u.id)
+          AND NOT EXISTS (SELECT 1 FROM gallery_images g WHERE g.uploaded_by_user_id = u.id)
+          AND NOT EXISTS (SELECT 1 FROM events e WHERE e.host_user_id = u.id)
+        FOR UPDATE
         ",
     )
     .bind(discord_id)
-    .fetch_one(&mut *transaction)
+    .fetch_optional(&mut *transaction)
     .await
-    .map_err(StartupError::SuperAdminBootstrap)?;
+    .map_err(StartupError::SuperAdminSync)?;
 
-    // FR-AUTH-008: Seed a private bootstrap profile if none exists.
-    sqlx::query(
-        r"
-        INSERT INTO profiles (user_id, nickname, bio_markdown, bio_html, is_public, updated_at)
-        VALUES ($1, 'SuperAdmin', '', '', false, NOW())
-        ON CONFLICT (user_id) DO NOTHING
-        ",
-    )
-    .bind(user_id)
-    .execute(&mut *transaction)
-    .await
-    .map_err(StartupError::SuperAdminBootstrap)?;
+    if let Some(user_id) = user_id {
+        sqlx::query(
+            r"
+            DELETE FROM users
+            WHERE id = $1
+            ",
+        )
+        .bind(user_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(StartupError::SuperAdminSync)?;
+
+        tracing::info!(
+            discord_id = discord_id,
+            user_id = %user_id,
+            "Removed legacy synthetic super admin placeholder"
+        );
+    }
 
     transaction
         .commit()
         .await
-        .map_err(StartupError::SuperAdminBootstrap)?;
+        .map_err(StartupError::SuperAdminSync)?;
 
-    tracing::info!(discord_id = discord_id, user_id = %user_id, "Super admin bootstrapped");
     Ok(())
 }
