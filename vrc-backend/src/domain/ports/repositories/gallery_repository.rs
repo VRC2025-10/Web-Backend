@@ -11,7 +11,7 @@ pub trait GalleryRepository: Send + Sync {
     ) -> impl std::future::Future<Output = Result<(Vec<GalleryImageRow>, i64), InfraError>> + Send;
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
 pub struct GalleryImageRow {
     pub id: Uuid,
     pub club_id: Uuid,
