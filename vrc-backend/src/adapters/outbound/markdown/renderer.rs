@@ -33,6 +33,7 @@ impl MarkdownRenderer for PulldownCmarkRenderer {
             .tags(ALLOWED_TAGS.iter().copied().collect())
             .add_tag_attributes("a", &["href", "title"])
             .add_tag_attributes("img", &["src", "alt", "title"])
+            .add_tag_attributes("input", &["type", "checked", "disabled"])
             .add_tag_attributes("th", &["align"])
             .add_tag_attributes("td", &["align"])
             .url_schemes(["https"].iter().copied().collect())
@@ -62,6 +63,7 @@ const ALLOWED_TAGS: &[&str] = &[
     "br",
     "hr",
     "img",
+    "input",
     "del",
     "table",
     "thead",
@@ -175,6 +177,14 @@ mod tests {
         assert!(html.contains("<dl>"));
         assert!(html.contains("<dt>Apple</dt>"));
         assert!(html.contains("<dd>Fruit</dd>"));
+    }
+
+    #[test]
+    fn test_render_task_list_checkbox_markup() {
+        let html = render("- [x] done\n- [ ] todo");
+        assert!(html.contains("type=\"checkbox\""));
+        assert!(html.contains("disabled"));
+        assert!(html.contains("checked"));
     }
 }
 
