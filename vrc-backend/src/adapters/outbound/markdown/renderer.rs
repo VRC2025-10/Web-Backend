@@ -19,7 +19,9 @@ impl Default for PulldownCmarkRenderer {
 impl MarkdownRenderer for PulldownCmarkRenderer {
     fn render(&self, markdown: &str) -> String {
         // Parse markdown with common extensions
-        let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES;
+        let options = Options::ENABLE_STRIKETHROUGH
+            | Options::ENABLE_TABLES
+            | Options::ENABLE_TASKLISTS;
         let parser = Parser::new_ext(markdown, options);
 
         // Render to HTML
@@ -29,8 +31,10 @@ impl MarkdownRenderer for PulldownCmarkRenderer {
         // Sanitize with ammonia — allowlist-based to prevent XSS
         ammonia::Builder::new()
             .tags(ALLOWED_TAGS.iter().copied().collect())
-            .add_tag_attributes("a", &["href"])
-            .add_tag_attributes("img", &["src", "alt"])
+            .add_tag_attributes("a", &["href", "title"])
+            .add_tag_attributes("img", &["src", "alt", "title"])
+            .add_tag_attributes("th", &["align"])
+            .add_tag_attributes("td", &["align"])
             .url_schemes(["https"].iter().copied().collect())
             .link_rel(Some("noopener noreferrer"))
             .clean(&html_output)
@@ -56,6 +60,7 @@ const ALLOWED_TAGS: &[&str] = &[
     "pre",
     "blockquote",
     "br",
+    "hr",
     "img",
     "del",
     "table",
@@ -64,6 +69,9 @@ const ALLOWED_TAGS: &[&str] = &[
     "tr",
     "th",
     "td",
+    "dl",
+    "dt",
+    "dd",
 ];
 
 #[cfg(test)]
@@ -153,6 +161,20 @@ mod tests {
         // Raw HTML img with non-https src should be stripped
         let html = render("<img src=\"http://evil.com/img.png\">");
         assert!(!html.contains("evil.com"));
+    }
+
+    #[test]
+    fn test_render_horizontal_rule() {
+        let html = render("before\n\n---\n\nafter");
+        assert!(html.contains("<hr"));
+    }
+
+    #[test]
+    fn test_render_allows_definition_list_html() {
+        let html = render("<dl><dt>Apple</dt><dd>Fruit</dd></dl>");
+        assert!(html.contains("<dl>"));
+        assert!(html.contains("<dt>Apple</dt>"));
+        assert!(html.contains("<dd>Fruit</dd>"));
     }
 }
 
