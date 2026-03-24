@@ -21,7 +21,9 @@ impl MarkdownRenderer for PulldownCmarkRenderer {
         // Parse markdown with common extensions
         let options = Options::ENABLE_STRIKETHROUGH
             | Options::ENABLE_TABLES
-            | Options::ENABLE_TASKLISTS;
+            | Options::ENABLE_TASKLISTS
+            | Options::ENABLE_FOOTNOTES
+            | Options::ENABLE_DEFINITION_LIST;
         let parser = Parser::new_ext(markdown, options);
 
         // Render to HTML
@@ -32,8 +34,10 @@ impl MarkdownRenderer for PulldownCmarkRenderer {
         ammonia::Builder::new()
             .tags(ALLOWED_TAGS.iter().copied().collect())
             .add_tag_attributes("a", &["href", "title"])
+            .add_tag_attributes("div", &["id", "class"])
             .add_tag_attributes("img", &["src", "alt", "title"])
             .add_tag_attributes("input", &["type", "checked", "disabled"])
+            .add_tag_attributes("sup", &["class"])
             .add_tag_attributes("th", &["align"])
             .add_tag_attributes("td", &["align"])
             .url_schemes(["https"].iter().copied().collect())
@@ -61,10 +65,12 @@ const ALLOWED_TAGS: &[&str] = &[
     "pre",
     "blockquote",
     "br",
+    "div",
     "hr",
     "img",
     "input",
     "del",
+    "sup",
     "table",
     "thead",
     "tbody",
@@ -185,6 +191,14 @@ mod tests {
         assert!(html.contains("type=\"checkbox\""));
         assert!(html.contains("disabled"));
         assert!(html.contains("checked"));
+    }
+
+    #[test]
+    fn test_render_footnotes() {
+        let html = render("A note.[^1]\n\n[^1]: Footnote body");
+        assert!(html.contains("footnote-reference"));
+        assert!(html.contains("footnote-definition"));
+        assert!(html.contains("Footnote body"));
     }
 }
 
