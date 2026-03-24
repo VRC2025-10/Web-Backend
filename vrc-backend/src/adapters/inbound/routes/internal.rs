@@ -37,7 +37,7 @@ struct OwnProfile {
     updated_at: chrono::DateTime<Utc>,
 }
 
-#[derive(Deserialize, vrc_macros::Validate)]
+#[derive(Clone, Deserialize, vrc_macros::Validate)]
 struct ProfileUpdateRequest {
     #[validate(min_length = 1, max_length = 50)]
     nickname: Option<String>,
@@ -52,9 +52,22 @@ struct ProfileUpdateRequest {
     is_public: bool,
 }
 
+impl ProfileUpdateRequest {
+    fn normalized(&self) -> Self {
+        Self {
+            nickname: normalize_optional_profile_text(self.nickname.as_deref()),
+            vrc_id: normalize_optional_profile_text(self.vrc_id.as_deref()),
+            x_id: normalize_optional_x_id(self.x_id.as_deref()),
+            bio_markdown: normalize_optional_profile_text(self.bio_markdown.as_deref()),
+            avatar_url: normalize_optional_profile_text(self.avatar_url.as_deref()),
+            is_public: self.is_public,
+        }
+    }
+}
+
 impl ValidatedPayload for ProfileUpdateRequest {
     fn validate_payload(&self) -> Result<(), HashMap<String, String>> {
-        self.validate()
+        self.normalized().validate()
     }
 
     fn validation_error(errors: HashMap<String, String>) -> ApiError {
@@ -153,6 +166,17 @@ struct EventSummary {
 /// represents absent values as null.
 fn none_if_empty(s: String) -> Option<String> {
     if s.is_empty() { None } else { Some(s) }
+}
+
+fn normalize_optional_profile_text(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn normalize_optional_x_id(value: Option<&str>) -> Option<String> {
+    normalize_optional_profile_text(value).map(|value| value.trim_start_matches('@').to_owned())
 }
 
 fn contains_html_event_handler(html: &str) -> bool {
@@ -436,7 +460,8 @@ async fn update_my_profile(
     auth: AuthenticatedUser<Member>,
     ValidatedJson(body): ValidatedJson<ProfileUpdateRequest>,
 ) -> Result<Json<OwnProfile>, ApiError> {
-    let bio_markdown = body.bio_markdown.unwrap_or_default();
+    let body = body.normalized();
+    let bio_markdown = body.bio_markdown.clone().unwrap_or_default();
 
     // Render markdown to HTML (ammonia sanitizes the output)
     let renderer = PulldownCmarkRenderer::new();

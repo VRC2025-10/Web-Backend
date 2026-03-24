@@ -445,6 +445,41 @@ async fn test_update_profile_invalid_vrc_id() -> TestResult {
 }
 
 #[tokio::test]
+async fn test_update_profile_allows_empty_optional_ids() -> TestResult {
+    let pool = setup_pool().await?;
+    let did = unique_discord_id();
+    let user_id = create_test_user(&pool, &did, "member").await?;
+    let session = create_test_session(&pool, user_id).await?;
+    let app = build_app(pool)?;
+
+    let body = serde_json::json!({
+        "vrc_id": "",
+        "x_id": "",
+        "bio_markdown": "Hello",
+        "is_public": true
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/v1/internal/me/profile")
+                .header("Cookie", format!("session_id={session}"))
+                .header("Origin", "http://localhost:5173")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body)?))?,
+        )
+        .await?;
+
+    let status = response.status();
+    let resp = parse_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "Profile update failed: {resp}");
+    assert!(resp["vrc_id"].is_null());
+    assert!(resp["x_id"].is_null());
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_public_members_excludes_private_profiles_from_list_and_count() -> TestResult {
     let pool = setup_pool().await?;
     let public_did = unique_discord_id();
