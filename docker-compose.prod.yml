@@ -13,7 +13,7 @@ services:
       - RUST_LOG=vrc_backend=info,tower_http=info,sqlx=warn
       - BIND_ADDRESS=0.0.0.0:3000
       - BACKEND_BASE_URL=https://vrcapi.arivell-vm.com
-      - DATABASE_URL=${DATABASE_URL:?set DATABASE_URL in .env with host db and a URL-encoded password}
+      - DATABASE_URL=postgres://${POSTGRES_USER:-vrc_app}:${POSTGRES_PASSWORD:-change-me}@db:5432/${POSTGRES_DB:-vrc_class_reunion}
       - FRONTEND_ORIGIN=https://vrc10.arivell-vm.com
       - DISCORD_REDIRECT_URI=https://vrcapi.arivell-vm.com/api/v1/auth/discord/callback
       - COOKIE_SECURE=true
@@ -61,8 +61,6 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
     volumes:
       - pgdata:/var/lib/postgresql/data
-    ports:
-      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vrc_app} -d ${POSTGRES_DB:-vrc_class_reunion}"]
       interval: 10s
@@ -110,12 +108,16 @@ services:
 volumes:
   pgdata:
     driver: local
+    name: vrc-prod-pgdata
   gallery_data:
     driver: local
+    name: vrc-prod-gallery-data
   caddy_data:
     driver: local
+    name: vrc-prod-caddy-data
   caddy_config:
     driver: local
+    name: vrc-prod-caddy-config
 
 networks:
   internal:
